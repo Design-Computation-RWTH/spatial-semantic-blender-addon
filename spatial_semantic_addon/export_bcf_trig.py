@@ -474,7 +474,7 @@ def export_bcf_fixture(
         "",
         f"@prefix {local_prefix}: <{base_iri}> .",
         f"@prefix bcf: <{bcf_base_iri(base_iri)}> .",
-        "@prefix bcfOWL: <http://lbd.arch.rwth-aachen.de/bcfOWL#> .",
+        "@prefix bcfOWL: <https://w3id.org/bcfOWL#> .",
         "@prefix dcat: <http://www.w3.org/ns/dcat#> .",
         "@prefix dcterms: <http://purl.org/dc/terms/> .",
         "@prefix foaf: <http://xmlns.com/foaf/0.1/> .",

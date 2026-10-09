@@ -1535,7 +1535,7 @@ def write_turtle(
         ]
     if include_picture_observations:
         lines[-2:-2] = [
-            "@prefix bcfOWL: <http://lbd.arch.rwth-aachen.de/bcfOWL#> .",
+            "@prefix bcfOWL: <https://w3id.org/bcfOWL#> .",
             "@prefix exif: <http://www.w3.org/2003/12/exif/ns#> .",
             "@prefix foaf: <http://xmlns.com/foaf/0.1/> .",
             "@prefix prov: <http://www.w3.org/ns/prov#> .",

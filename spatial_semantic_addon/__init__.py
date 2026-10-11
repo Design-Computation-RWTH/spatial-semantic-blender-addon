@@ -1138,6 +1138,34 @@ def resolve_represents_owner(
     return represents_link_owner(helper), helper, None
 
 
+PLACE_IN_ACTIVE_ASSET_SPACE_DESCRIPTION = (
+    "Place the imported root's contents inside the active AssetSpace helper "
+    "instead of replacing the helper collection. Its box and axis directions "
+    "resolve SPOT-AM relations to the imported root"
+)
+
+
+def import_anchor_from_context(
+    operator: bpy.types.Operator,
+    context: bpy.types.Context,
+) -> tuple[bool, bpy.types.Object | None]:
+    """The active AssetSpace helper to import into, when the option asks for one."""
+    if not operator.place_in_active_asset_space:
+        return True, None
+    anchor = context.active_object
+    if (
+        anchor is None
+        or not anchor.get(PROP_HELPER)
+        or anchor.get(PROP_SPOT_CLASS) != SPOT_CLASS_ASSET
+    ):
+        operator.report(
+            {"ERROR"},
+            "Make an AssetSpace helper active to import into it",
+        )
+        return False, None
+    return True, anchor
+
+
 def operator_error_message(error: Exception) -> str:
     """
     A message that still says something once Blender shows it in the status bar.
@@ -1356,12 +1384,21 @@ class SPOT_OT_import_turtle_as(ImportHelper, bpy.types.Operator):
         description="Name of the helper collection to create or replace",
         default=HELPER_COLLECTION_NAME,
     )
+    place_in_active_asset_space: BoolProperty(
+        name="Place Inside Active AssetSpace",
+        description=PLACE_IN_ACTIVE_ASSET_SPACE_DESCRIPTION,
+        default=False,
+    )
 
     def execute(self, context: bpy.types.Context) -> set[str]:
+        valid, anchor = import_anchor_from_context(self, context)
+        if not valid:
+            return {"CANCELLED"}
         try:
             result = import_scene_graph_turtle(
                 input_path=self.filepath,
                 helper_collection_name=self.helper_collection,
+                anchor_helper=anchor,
             )
         except Exception as error:
             self.report({"ERROR"}, operator_error_message(error))
@@ -1406,6 +1443,11 @@ class SPOT_OT_import_dataset_folder(bpy.types.Operator):
         description="Name of the helper collection to create or replace",
         default=HELPER_COLLECTION_NAME,
     )
+    place_in_active_asset_space: BoolProperty(
+        name="Place Inside Active AssetSpace",
+        description=PLACE_IN_ACTIVE_ASSET_SPACE_DESCRIPTION,
+        default=False,
+    )
 
     def invoke(
         self,
@@ -1416,10 +1458,14 @@ class SPOT_OT_import_dataset_folder(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context: bpy.types.Context) -> set[str]:
+        valid, anchor = import_anchor_from_context(self, context)
+        if not valid:
+            return {"CANCELLED"}
         try:
             result = import_scene_graph_turtle(
                 input_path=self.directory,
                 helper_collection_name=self.helper_collection,
+                anchor_helper=anchor,
             )
         except Exception as error:
             self.report({"ERROR"}, operator_error_message(error))

@@ -2,18 +2,29 @@ from __future__ import annotations
 
 import argparse
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urljoin
 
 import bpy
 from mathutils import Matrix, Vector
 
-from .build_spot_scene import instantiate_helpers, save_blend_file
+from .build_spot_scene import (
+    frame_without_scale,
+    instantiate_helpers,
+    save_blend_file,
+    scaled_local_bbox,
+)
 from .spot_am_placement import (
+    AXIS_NAMES,
+    DEFAULT_AXIS_DIRECTIONS,
+    LOWER_END,
+    UPPER_END,
     BoundaryPointMapping,
     SpotAmSpace,
     derive_spot_am_placements,
+    frame_axis_for_direction,
+    resolve_directional_frame,
 )
 from .spot_blender_common import (
     BOT_CLASS_BUILDING,
@@ -25,6 +36,7 @@ from .spot_blender_common import (
     LENGTH_UNIT_METER,
     LENGTH_UNIT_PIXEL,
     PROP_HELPER,
+    PROP_LABEL,
     PROP_REPRESENTS_LINKS,
     PROP_URI_SUFFIX,
     ROLE_BUILDING,
@@ -40,6 +52,8 @@ from .spot_blender_common import (
     append_name_tags,
     bbox_vertices,
     blender_script_argv,
+    helper_asset_axis_direction,
+    helper_local_bbox,
     reset_helper_collection,
     slugify,
 )
@@ -110,6 +124,37 @@ class ImportedSpace:
     parent_iri: str | None = None
     children: list[str] = field(default_factory=list)
     approximate_region: bool = False
+    # Stands for an AssetSpace helper already in the scene (see ImportAnchor).
+    anchored: bool = False
+
+
+@dataclass
+class ImportAnchor:
+    """An AssetSpace helper already in the scene that the import fills.
+
+    It takes the place of the imported root: its box and axis directions are
+    the extent and frame that SPOT-AM relations to the root are resolved in.
+    """
+
+    local_bbox: list[float]
+    axis_directions: dict[str, str]
+
+
+@dataclass
+class SpotAmStatements:
+    """The SPOT-AM statements gathered while parsing."""
+
+    appearance_boundary_mappings: dict[str, list[str]] = field(default_factory=dict)
+    appearance_axis_mappings: dict[str, list[str]] = field(default_factory=dict)
+    boundary_point_mappings: dict[str, BoundaryPointMapping] = field(
+        default_factory=dict
+    )
+    # "Min" or "Max", or None for a plain spot-am:BoundaryPoint.
+    boundary_point_kinds: dict[str, str | None] = field(default_factory=dict)
+    point_axes: dict[str, str] = field(default_factory=dict)
+    # Mapping IRI to (source axis, target axis, whether they are antiparallel).
+    axis_mappings: dict[str, tuple[str, str, bool]] = field(default_factory=dict)
+    axis_directions: dict[str, str] = field(default_factory=dict)
 
 
 def parse_args() -> argparse.Namespace:
@@ -540,15 +585,64 @@ def helper_name_for_import(
     )
 
 
+def carried_axes(
+    appearance_id: str,
+    am: SpotAmStatements,
+    target_frame: dict[str, str],
+) -> dict[str, tuple[str, bool]]:
+    """Where each source axis of an appearance lands on the parent's axes.
+
+    A target axis is matched by the direction it points in, not by its name,
+    so the mapping still holds when an anchor with another frame stands in for
+    the imported root.
+    """
+    carried: dict[str, tuple[str, bool]] = {}
+    for mapping_id in am.appearance_axis_mappings.get(appearance_id, []):
+        axis_mapping = am.axis_mappings.get(mapping_id)
+        if axis_mapping is None:
+            continue
+        source_axis, target_axis, antiparallel = axis_mapping
+        direction = am.axis_directions.get(target_axis)
+        resolved = (
+            frame_axis_for_direction(target_frame, direction) if direction else None
+        )
+        if resolved is None:
+            continue
+        axis_name, is_positive = resolved
+        carried[source_axis] = (axis_name, antiparallel == is_positive)
+    return carried
+
+
+def boundary_point_end(
+    point_iri: str,
+    am: SpotAmStatements,
+    carried: dict[str, tuple[str, bool]],
+    axis_names: dict[str, str],
+) -> tuple[str, int] | None:
+    """Name the end of its space a min or max point bounds, on the parent's axes."""
+    kind = am.boundary_point_kinds.get(point_iri)
+    axis_iri = am.point_axes.get(point_iri)
+    if kind is None or axis_iri is None:
+        return None
+    if axis_iri in carried:
+        axis_name, flipped = carried[axis_iri]
+    elif axis_iri in axis_names:
+        # Without an axis mapping the source axes are taken to coincide with
+        # the parent's, as the validation viewer does.
+        axis_name, flipped = axis_names[axis_iri], False
+    else:
+        return None
+    is_min = kind == "Min"
+    return axis_name, LOWER_END if is_min != flipped else UPPER_END
+
+
 def apply_spot_am_placements(
     spaces: dict[str, ImportedSpace],
-    appearance_sources: dict[str, str],
+    chosen_appearances: dict[str, str],
     appearance_matrices: dict[str, Matrix],
-    appearance_boundary_mappings: dict[str, list[str]],
-    boundary_point_mappings: dict[str, BoundaryPointMapping],
-    boundary_points: set[str],
-    axis_directions: dict[str, str],
+    am: SpotAmStatements,
     space_axes: dict[str, dict[str, str]],
+    anchor: ImportAnchor | None,
     warning_messages: list[str],
 ) -> None:
     """Place spaces that SPOT-AM locates only approximately.
@@ -557,39 +651,31 @@ def apply_spot_am_placements(
     otherwise leave it at its parent's origin at a default marker size. The
     derived region replaces both its position and its bounding box.
     """
-    mappings_by_space: dict[str, list[BoundaryPointMapping]] = {}
-    for appearance_id, mapping_ids in appearance_boundary_mappings.items():
-        source_iri = appearance_sources.get(appearance_id)
-        if source_iri is None or source_iri not in spaces:
-            continue
-        # An explicit matrix states the position outright; the approximate
-        # region is only needed when nothing else places the space.
-        matrix = appearance_matrices.get(appearance_id)
-        if matrix is not None and matrix != Matrix.Identity(4):
-            continue
-
-        resolved = [
-            boundary_point_mappings[mapping_id]
-            for mapping_id in mapping_ids
-            if mapping_id in boundary_point_mappings
-            and boundary_point_mappings[mapping_id].source_point_iri
-            in boundary_points
-        ]
-        if resolved:
-            mappings_by_space[source_iri] = resolved
-
-    if not mappings_by_space:
-        return
-
     directions_by_space: dict[str, dict[str, str]] = {}
     for space_iri, axes in space_axes.items():
         directions = {
-            axis_name: axis_directions[axis_iri]
+            axis_name: am.axis_directions[axis_iri]
             for axis_name, axis_iri in axes.items()
-            if axis_iri in axis_directions
+            if axis_iri in am.axis_directions
         }
         if directions:
             directions_by_space[space_iri] = directions
+
+    if anchor is not None:
+        for space_iri, space in spaces.items():
+            if not space.anchored:
+                continue
+            stated = directions_by_space.get(space_iri)
+            if stated and any(
+                anchor.axis_directions.get(axis_name) != direction
+                for axis_name, direction in stated.items()
+            ):
+                warning_messages.append(
+                    f"The imported root '{space.local_name}' states axis directions "
+                    f"{stated}; the AssetSpace it is placed in uses "
+                    f"{anchor.axis_directions}, which take precedence"
+                )
+            directions_by_space[space_iri] = dict(anchor.axis_directions)
 
     am_spaces = {
         space_iri: SpotAmSpace(
@@ -601,6 +687,54 @@ def apply_spot_am_placements(
         )
         for space_iri, space in spaces.items()
     }
+    axis_names = {
+        axis_iri: axis_name
+        for axes in space_axes.values()
+        for axis_name, axis_iri in axes.items()
+    }
+
+    mappings_by_space: dict[str, list[BoundaryPointMapping]] = {}
+    for space_iri, appearance_id in chosen_appearances.items():
+        space = spaces.get(space_iri)
+        mapping_ids = am.appearance_boundary_mappings.get(appearance_id)
+        if space is None or not mapping_ids:
+            continue
+        # An explicit matrix states the position outright; the approximate
+        # region is only needed when nothing else places the space.
+        matrix = appearance_matrices.get(appearance_id)
+        if matrix is not None and matrix != Matrix.Identity(4):
+            continue
+
+        target_frame = (
+            resolve_directional_frame(space.parent_iri, am_spaces)
+            if space.parent_iri is not None
+            else dict(DEFAULT_AXIS_DIRECTIONS)
+        )
+        carried = carried_axes(appearance_id, am, target_frame)
+        resolved = [
+            replace(
+                am.boundary_point_mappings[mapping_id],
+                source_end=boundary_point_end(
+                    am.boundary_point_mappings[mapping_id].source_point_iri,
+                    am,
+                    carried,
+                    axis_names,
+                ),
+                flattens_axis=am.boundary_point_kinds[
+                    am.boundary_point_mappings[mapping_id].source_point_iri
+                ]
+                is None,
+            )
+            for mapping_id in mapping_ids
+            if mapping_id in am.boundary_point_mappings
+            and am.boundary_point_mappings[mapping_id].source_point_iri
+            in am.boundary_point_kinds
+        ]
+        if resolved:
+            mappings_by_space[space_iri] = resolved
+
+    if not mappings_by_space:
+        return
 
     placements = derive_spot_am_placements(am_spaces, mappings_by_space)
     for space_iri, placement in placements.items():
@@ -611,9 +745,20 @@ def apply_spot_am_placements(
 
     unresolved = sorted(set(mappings_by_space) - set(placements))
     if unresolved:
+        root_without_extent = [
+            space.local_name
+            for space in spaces.values()
+            if space.parent_iri is None and space.local_bbox is None
+        ]
+        hint = (
+            f"; the root {', '.join(root_without_extent)} has no bounding box, so "
+            "import it into an existing AssetSpace or give it spot-sg:hasBoundingBox"
+            if root_without_extent
+            else ""
+        )
         warning_messages.append(
             f"Could not derive an approximate position for {len(unresolved)} "
-            "SPOT-AM spaces"
+            f"SPOT-AM spaces{hint}"
         )
     if placements:
         warning_messages.append(
@@ -621,9 +766,27 @@ def apply_spot_am_placements(
         )
 
 
+def anchored_root_id(
+    spaces: dict[str, ImportedSpace],
+    root_ids: list[str],
+) -> str:
+    asset_roots = [
+        root_id for root_id in root_ids if spaces[root_id].spot_class == SPOT_CLASS_ASSET
+    ]
+    if len(asset_roots) == 1:
+        return asset_roots[0]
+    if not asset_roots and len(root_ids) == 1:
+        return root_ids[0]
+    raise RuntimeError(
+        "Importing into an existing AssetSpace needs exactly one root AssetSpace "
+        f"in the input; found {len(asset_roots)} among {len(root_ids)} roots"
+    )
+
+
 def parse_scene_graph_turtle(
     text: str,
     warnings: list[str] | None = None,
+    anchor: ImportAnchor | None = None,
 ) -> tuple[dict[str, ImportedSpace], list[str]]:
     warning_messages = warnings if warnings is not None else []
     spaces: dict[str, ImportedSpace] = {}
@@ -631,10 +794,7 @@ def parse_scene_graph_turtle(
     appearance_targets: dict[str, str] = {}
     appearance_matrices: dict[str, Matrix] = {}
     appearance_types: dict[str, str] = {}
-    appearance_boundary_mappings: dict[str, list[str]] = {}
-    boundary_point_mappings: dict[str, BoundaryPointMapping] = {}
-    boundary_points: set[str] = set()
-    axis_directions: dict[str, str] = {}
+    am = SpotAmStatements()
     space_axes: dict[str, dict[str, str]] = {}
     bot_types: dict[str, str] = {}
     beo_types: dict[str, str] = {}
@@ -669,6 +829,14 @@ def parse_scene_graph_turtle(
         for appearance_id in linked_appearances:
             appearance_sources[appearance_id] = subject
 
+        # An axis lists its boundary points, often in a statement of its own.
+        for point_iri in split_turtle_object_list(
+            predicates.get("spot-am:hasBoundaryPoint", "")
+        ):
+            am.point_axes[point_iri] = subject
+        if "spot-am:hasBoundaryPoint" in predicates and not rdf_types:
+            continue
+
         if "spot:appearsIn" in predicates:
             appearance_type = next(
                 (
@@ -684,7 +852,12 @@ def parse_scene_graph_turtle(
                 predicates.get("spot-am:hasBoundaryPointMapping", "")
             )
             if boundary_point_mapping_ids:
-                appearance_boundary_mappings[subject] = boundary_point_mapping_ids
+                am.appearance_boundary_mappings[subject] = boundary_point_mapping_ids
+            axis_mapping_ids = split_turtle_object_list(
+                predicates.get("spot-am:hasAxisMapping", "")
+            )
+            if axis_mapping_ids:
+                am.appearance_axis_mappings[subject] = axis_mapping_ids
             target_values = split_turtle_object_list(predicates["spot:appearsIn"])
             if len(target_values) > 1:
                 warning_messages.append(
@@ -734,17 +907,40 @@ def parse_scene_graph_turtle(
             if relation is not None and source_points:
                 targets = split_turtle_object_list(predicates[relation])
                 if targets:
-                    boundary_point_mappings[subject] = BoundaryPointMapping(
+                    am.boundary_point_mappings[subject] = BoundaryPointMapping(
                         relation_name=parse_prefixed_local_name(relation),
                         source_point_iri=source_points[0],
                         target_iri=targets[0],
                     )
             continue
 
-        if "spot-am:MinBoundaryPoint" in rdf_types or (
-            "spot-am:MaxBoundaryPoint" in rdf_types
-        ):
-            boundary_points.add(subject)
+        if "spot-am:AxisMapping" in rdf_types:
+            source_axes = split_turtle_object_list(
+                predicates.get("spot-am:hasSourceAxis", "")
+            )
+            target_axes = split_turtle_object_list(
+                predicates.get("spot-am:hasTargetAxis", "")
+            )
+            relation_types = split_turtle_object_list(
+                predicates.get("spot-am:hasAxisRelationType", "")
+            )
+            if source_axes and target_axes:
+                am.axis_mappings[subject] = (
+                    source_axes[0],
+                    target_axes[0],
+                    bool(relation_types)
+                    and parse_prefixed_local_name(relation_types[0]) == "Antiparallel",
+                )
+            continue
+
+        if "spot-am:MinBoundaryPoint" in rdf_types:
+            am.boundary_point_kinds[subject] = "Min"
+            continue
+        if "spot-am:MaxBoundaryPoint" in rdf_types:
+            am.boundary_point_kinds[subject] = "Max"
+            continue
+        if "spot-am:BoundaryPoint" in rdf_types:
+            am.boundary_point_kinds[subject] = None
             continue
 
         if "spot:Axis" in rdf_types:
@@ -752,7 +948,7 @@ def parse_scene_graph_turtle(
                 predicates.get("spot:hasDirection", "")
             )
             if directions:
-                axis_directions[subject] = parse_prefixed_local_name(directions[0])
+                am.axis_directions[subject] = parse_prefixed_local_name(directions[0])
             continue
 
         spot_space_types = [
@@ -859,6 +1055,8 @@ def parse_scene_graph_turtle(
         raise RuntimeError("No SPOT spaces were found in the Turtle input.")
 
     chosen_priorities: dict[str, int] = {}
+    chosen_appearances: dict[str, str] = {}
+    tied_appearance_counts: dict[str, int] = {}
 
     for appearance_id, source_iri in appearance_sources.items():
         source_space = spaces.get(source_iri)
@@ -879,13 +1077,29 @@ def parse_scene_graph_turtle(
         # A document appearance places the space on a drawing sheet rather than
         # in the building, so it only wins when nothing else placed the space.
         priority = appearance_priority(appearance_types.get(appearance_id))
+        if priority == chosen_priorities.get(source_iri):
+            tied_appearance_counts[source_iri] = (
+                tied_appearance_counts.get(source_iri, 1) + 1
+            )
         if priority <= chosen_priorities.get(source_iri, -1):
             continue
 
         chosen_priorities[source_iri] = priority
+        chosen_appearances[source_iri] = appearance_id
+        tied_appearance_counts.pop(source_iri, None)
         source_space.parent_iri = target_iri
         source_space.local_matrix = appearance_matrices.get(
             appearance_id, Matrix.Identity(4)
+        )
+
+    if tied_appearance_counts:
+        warning_messages.append(
+            f"{len(tied_appearance_counts)} spaces appear more than once in the same "
+            "kind of space; only their first appearance is placed: "
+            + ", ".join(
+                f"{parse_prefixed_local_name(space_iri)} ({count}x)"
+                for space_iri, count in sorted(tied_appearance_counts.items())
+            )
         )
 
     document_only_spaces = {
@@ -946,15 +1160,18 @@ def parse_scene_graph_turtle(
             "Expected at least one root space in the imported scene graph"
         )
 
+    if anchor is not None:
+        anchored_space = spaces[anchored_root_id(spaces, root_ids)]
+        anchored_space.anchored = True
+        anchored_space.local_bbox = list(anchor.local_bbox)
+
     apply_spot_am_placements(
         spaces,
-        appearance_sources,
+        chosen_appearances,
         appearance_matrices,
-        appearance_boundary_mappings,
-        boundary_point_mappings,
-        boundary_points,
-        axis_directions,
+        am,
         space_axes,
+        anchor,
         warning_messages,
     )
 
@@ -1059,6 +1276,7 @@ def apply_represents_links(
 def build_imported_scene_spec(
     spaces: dict[str, ImportedSpace],
     root_id: str,
+    root_world_matrix: Matrix | None = None,
 ) -> SpaceNodeSpec:
     def build_node(
         space_id: str,
@@ -1076,7 +1294,7 @@ def build_imported_scene_spec(
         world_matrix = (
             parent_world_matrix @ local_matrix
             if parent_world_matrix is not None
-            else Matrix.Identity(4)
+            else (root_world_matrix or Matrix.Identity(4)).copy()
         )
         if space.local_bbox is not None:
             world_bbox = local_bbox_to_world_bbox(space.local_bbox, world_matrix)
@@ -1128,11 +1346,50 @@ def build_imported_scene_spec(
     return build_node(root_id, None, None, 0)
 
 
+def import_anchor_for_helper(helper: bpy.types.Object) -> ImportAnchor:
+    if not helper.get(PROP_HELPER):
+        raise RuntimeError(f"'{helper.name}' is not a SPOT helper")
+    return ImportAnchor(
+        # Helpers built before scale was moved into the box keep it in their
+        # frame; the imported spaces are laid out in metres either way.
+        local_bbox=scaled_local_bbox(helper_local_bbox(helper), helper.matrix_world),
+        axis_directions={
+            axis_name: helper_asset_axis_direction(helper, axis_name)
+            for axis_name in AXIS_NAMES
+        },
+    )
+
+
+def remove_helpers_with_suffixes(
+    collection: bpy.types.Collection,
+    uri_suffixes: set[str],
+    keep: bpy.types.Object,
+) -> int:
+    """Remove helpers a repeated import into the same AssetSpace replaces."""
+    stale = [
+        obj
+        for obj in collection.objects
+        if obj is not keep
+        and obj.get(PROP_HELPER)
+        and str(obj.get(PROP_URI_SUFFIX)) in uri_suffixes
+    ]
+    for obj in stale:
+        bpy.data.objects.remove(obj, do_unlink=True)
+    return len(stale)
+
+
 def import_scene_graph_turtle(
     input_path: str | Path,
     helper_collection_name: str = HELPER_COLLECTION_NAME,
     save_blend_path: str | None = None,
+    anchor_helper: bpy.types.Object | None = None,
 ) -> dict[str, object]:
+    """Import a scene graph as SPOT helpers.
+
+    With ``anchor_helper``, the input's root AssetSpace is not created: its
+    contents are placed inside that existing helper, next to the helpers
+    already in its collection, instead of replacing the helper collection.
+    """
     resolved_input = Path(input_path).expanduser().resolve()
     if resolved_input.is_dir():
         text, input_files = load_dataset_folder(resolved_input)
@@ -1140,13 +1397,57 @@ def import_scene_graph_turtle(
         text = resolved_input.read_text(encoding="utf8")
         input_files = [resolved_input.name]
     warnings: list[str] = []
-    spaces, root_ids = parse_scene_graph_turtle(text, warnings=warnings)
-    root_specs = [build_imported_scene_spec(spaces, root_id) for root_id in root_ids]
+    anchor = import_anchor_for_helper(anchor_helper) if anchor_helper else None
+    spaces, root_ids = parse_scene_graph_turtle(
+        text, warnings=warnings, anchor=anchor
+    )
 
     scene = bpy.context.scene
-    helper_collection = reset_helper_collection(scene, helper_collection_name)
-    for root_spec in root_specs:
+    root_helper_names: list[str] = []
+    root_labels: list[str] = []
+    if anchor_helper is None:
+        helper_collection = reset_helper_collection(scene, helper_collection_name)
+    else:
+        scale = anchor_helper.matrix_world.to_scale()
+        if any(abs(value - 1.0) > 1e-6 for value in scale):
+            warnings.append(
+                f"The AssetSpace helper '{anchor_helper.name}' is scaled by "
+                f"{tuple(round(value, 3) for value in scale)}; rebuild the helper "
+                "scene so its box is stated in metres before exporting"
+            )
+        helper_collection = anchor_helper.users_collection[0]
+        replaced = remove_helpers_with_suffixes(
+            helper_collection,
+            {space.local_name for space in spaces.values() if not space.anchored},
+            keep=anchor_helper,
+        )
+        if replaced:
+            warnings.append(
+                f"Replaced {replaced} helpers left by an earlier import"
+            )
+
+    for root_id in root_ids:
+        if spaces[root_id].anchored:
+            anchor_world_matrix = frame_without_scale(anchor_helper.matrix_world)
+            root_spec = build_imported_scene_spec(
+                spaces, root_id, root_world_matrix=anchor_world_matrix
+            )
+            for child_spec in root_spec.children:
+                # The children are laid out in the unscaled frame, but parented
+                # to the helper as it stands, scale and all.
+                instantiate_helpers(
+                    helper_collection,
+                    child_spec,
+                    parent=anchor_helper,
+                    parent_world_matrix=anchor_helper.matrix_world.copy(),
+                )
+            root_helper_names.append(anchor_helper.name)
+            root_labels.append(str(anchor_helper.get(PROP_LABEL, anchor_helper.name)))
+            continue
+        root_spec = build_imported_scene_spec(spaces, root_id)
         instantiate_helpers(helper_collection, root_spec)
+        root_helper_names.append(root_spec.helper_name)
+        root_labels.append(root_spec.label)
     apply_represents_links(spaces, helper_collection, warnings)
     bpy.context.view_layer.update()
 
@@ -1158,9 +1459,9 @@ def import_scene_graph_turtle(
         "input_files": input_files,
         "helper_collection_name": helper_collection.name,
         "helper_count": helper_count,
-        "root_helper_name": root_specs[0].helper_name,
-        "root_label": root_specs[0].label,
-        "root_helper_names": [root_spec.helper_name for root_spec in root_specs],
+        "root_helper_name": root_helper_names[0],
+        "root_label": root_labels[0],
+        "root_helper_names": root_helper_names,
         "warning_count": len(warnings),
         "warnings": warnings,
         "saved_blend_path": None,

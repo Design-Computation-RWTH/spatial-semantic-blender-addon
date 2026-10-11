@@ -6,13 +6,22 @@ points of the damage and the room it sits in. Each relation narrows one axis to
 a third of the room's extent, and the surviving box is the region the damage is
 known to be inside.
 
-This mirrors ``deriveSpotAmFuzzyEntityPlacements`` in the validation viewer's
-``spot-q`` package so both tools agree on where an approximate damage sits.
+The region rules mirror ``deriveSpotAmFuzzyEntityPlacements`` in the validation
+viewer's ``spot-q`` package so both tools agree on where an approximate damage
+sits. Two things go further than the viewer:
+
+- ``disjoint*`` relations place a point in the band one third of the target's
+  extent beyond the named face.
+- A plain ``spot-am:BoundaryPoint`` flattens its axis: the region it names
+  is narrowed to its middle, so a section stays a plane and a camera a point.
+- Siblings that ``meet`` each other share a face, and faces no relation pins
+  down are spread evenly between the ones that are pinned. Spans chained from
+  the front of a bridge to its rear then split its length equally.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from mathutils import Matrix, Vector
 
@@ -50,6 +59,10 @@ DEFAULT_AXIS_DIRECTIONS = {
 
 AXIS_NAMES = ("X", "Y", "Z")
 
+# The two ends of a space along one axis of its parent.
+LOWER_END = 0
+UPPER_END = 1
+
 CENTER_SUFFIX_DIRECTIONS = {
     "VerticalCenter": DIRECTION_TOP,
     "TransversalCenter": DIRECTION_RIGHT,
@@ -65,6 +78,13 @@ class BoundaryPointMapping:
     source_point_iri: str
     target_iri: str
     normalized_coordinate: float | None = None
+    # The end of the source space this point bounds, on the parent's axes:
+    # (axis name, LOWER_END or UPPER_END). None when that is not known; the
+    # point then bounds both ends, so the space spans the region.
+    source_end: tuple[str, int] | None = None
+    # A plain spot-am:BoundaryPoint: the space has no extent along this axis,
+    # as a section has none across its plane, so both ends are one point.
+    flattens_axis: bool = False
 
 
 @dataclass
@@ -210,6 +230,16 @@ def relation_interval(
             lower_fraction = upper_fraction = 0.0
         else:
             return None
+    elif relation_name.startswith("disjoint"):
+        direction = directional_suffix(relation_name)
+        if direction is None:
+            return None
+        if direction == positive_direction:
+            lower_fraction, upper_fraction = 1.0, 4.0 / 3.0
+        elif direction == opposite:
+            lower_fraction, upper_fraction = -1.0 / 3.0, 0.0
+        else:
+            return None
     else:
         return None
 
@@ -218,6 +248,23 @@ def relation_interval(
         lower + span * lower_fraction,
         lower + span * upper_fraction,
     )
+
+
+def relation_face(
+    relation_name: str,
+    frame: dict[str, str],
+) -> tuple[str, int] | None:
+    """Name the face of the target that a ``meet*`` relation touches."""
+    if not relation_name.startswith("meet"):
+        return None
+    direction = directional_suffix(relation_name)
+    if direction is None:
+        return None
+    resolved = frame_axis_for_direction(frame, direction)
+    if resolved is None:
+        return None
+    axis_name, is_positive = resolved
+    return axis_name, UPPER_END if is_positive else LOWER_END
 
 
 def resolve_directional_frame(
@@ -327,28 +374,271 @@ def extent_in_reference_frame(
     return transform_bbox(reference_from_world @ space_world, space.local_bbox)
 
 
-def derive_spot_am_placements(
+EndpointKey = tuple[str, str, int]
+
+
+class EndpointSolver:
+    """Ends of sibling spaces along the parent's axes, and what pins them.
+
+    Ends that ``meet`` share a face and are merged into one class. A class is
+    pinned by the regions relations give it; the rest are interpolated along
+    the chains that lead from one pinned class to the next.
+
+    A region taken from a sibling's derived box is "dependent": it places the
+    end it describes, but never pins the chain the sibling belongs to. Section
+    D-D lying "in the front of span 2" would otherwise drag the face between
+    spans 1 and 2 forward, which moves span 2, which moves D-D again.
+    """
+
+    def __init__(self) -> None:
+        self.parents: dict[EndpointKey, EndpointKey] = {}
+        self.intervals: dict[EndpointKey, list[AxisInterval]] = {}
+        self.dependent_intervals: dict[EndpointKey, list[AxisInterval]] = {}
+
+    def find(self, key: EndpointKey) -> EndpointKey:
+        self.parents.setdefault(key, key)
+        root = key
+        while self.parents[root] != root:
+            root = self.parents[root]
+        while self.parents[key] != root:
+            self.parents[key], key = root, self.parents[key]
+        return root
+
+    def union(self, left: EndpointKey, right: EndpointKey) -> None:
+        left_root, right_root = self.find(left), self.find(right)
+        if left_root != right_root:
+            self.parents[right_root] = left_root
+
+    def add_interval(
+        self,
+        key: EndpointKey,
+        interval: AxisInterval,
+        dependent: bool = False,
+    ) -> None:
+        self.find(key)
+        store = self.dependent_intervals if dependent else self.intervals
+        store.setdefault(key, []).append(interval)
+
+    def solve(self) -> dict[EndpointKey, tuple[float, float]]:
+        """Give each end the range it is known to lie in."""
+        members: dict[EndpointKey, list[EndpointKey]] = {}
+        for key in self.parents:
+            members.setdefault(self.find(key), []).append(key)
+
+        ranges = self.pinned_ranges(members, self.intervals)
+        ranges.update(self.interpolate(ranges))
+        for root, value in self.pinned_ranges(
+            members, self.dependent_intervals
+        ).items():
+            ranges.setdefault(root, value)
+        return {
+            key: ranges[self.find(key)]
+            for key in self.parents
+            if self.find(key) in ranges
+        }
+
+    @staticmethod
+    def pinned_ranges(
+        members: dict[EndpointKey, list[EndpointKey]],
+        intervals_by_key: dict[EndpointKey, list[AxisInterval]],
+    ) -> dict[EndpointKey, tuple[float, float]]:
+        ranges: dict[EndpointKey, tuple[float, float]] = {}
+        for root, keys in members.items():
+            intervals = [
+                interval
+                for key in keys
+                for interval in intervals_by_key.get(key, [])
+            ]
+            if not intervals:
+                continue
+            if len(keys) == 1:
+                # A lone end keeps the whole region, as one relation only says
+                # the end lies somewhere inside it.
+                ranges[root] = (
+                    min(interval.lower_value for interval in intervals),
+                    max(interval.upper_value for interval in intervals),
+                )
+                continue
+            # A shared face is one plane: take the middle of what all its
+            # relations allow.
+            lower = max(interval.lower_value for interval in intervals)
+            upper = min(interval.upper_value for interval in intervals)
+            if lower > upper:
+                lower = min(interval.lower_value for interval in intervals)
+                upper = max(interval.upper_value for interval in intervals)
+            middle = (lower + upper) / 2.0
+            ranges[root] = (middle, middle)
+        return ranges
+
+    def interpolate(
+        self,
+        pinned: dict[EndpointKey, tuple[float, float]],
+    ) -> dict[EndpointKey, tuple[float, float]]:
+        """Spread unpinned faces evenly between the pinned faces around them."""
+        successors: dict[EndpointKey, set[EndpointKey]] = {}
+        predecessors: dict[EndpointKey, set[EndpointKey]] = {}
+        spaces_axes = {(key[0], key[1]) for key in self.parents}
+        for space_iri, axis_name in spaces_axes:
+            lower_key = (space_iri, axis_name, LOWER_END)
+            upper_key = (space_iri, axis_name, UPPER_END)
+            if lower_key not in self.parents or upper_key not in self.parents:
+                continue
+            lower_root, upper_root = self.find(lower_key), self.find(upper_key)
+            if lower_root == upper_root:
+                continue
+            successors.setdefault(lower_root, set()).add(upper_root)
+            predecessors.setdefault(upper_root, set()).add(lower_root)
+
+        nodes = set(successors) | set(predecessors)
+        order = topological_order(nodes, successors, predecessors)
+
+        def anchor_value(root: EndpointKey) -> float:
+            lower, upper = pinned[root]
+            return (lower + upper) / 2.0
+
+        # Nearest pinned value below each face, and how many steps away it is.
+        below: dict[EndpointKey, tuple[float, int]] = {}
+        for root in order:
+            if root in pinned:
+                below[root] = (anchor_value(root), 0)
+                continue
+            candidates = [
+                (below[previous][0], below[previous][1] + 1)
+                for previous in predecessors.get(root, ())
+                if previous in below
+            ]
+            if candidates:
+                below[root] = max(candidates)
+
+        above: dict[EndpointKey, tuple[float, int]] = {}
+        for root in reversed(order):
+            if root in pinned:
+                above[root] = (anchor_value(root), 0)
+                continue
+            candidates = [
+                (above[following][0], above[following][1] + 1)
+                for following in successors.get(root, ())
+                if following in above
+            ]
+            if candidates:
+                above[root] = min(candidates, key=lambda item: (item[0], -item[1]))
+
+        interpolated: dict[EndpointKey, tuple[float, float]] = {}
+        for root in order:
+            if root in pinned or root not in below or root not in above:
+                continue
+            lower_value, lower_steps = below[root]
+            upper_value, upper_steps = above[root]
+            value = lower_value + (upper_value - lower_value) * (
+                lower_steps / (lower_steps + upper_steps)
+            )
+            interpolated[root] = (value, value)
+        return interpolated
+
+
+def topological_order(
+    nodes: set[EndpointKey],
+    successors: dict[EndpointKey, set[EndpointKey]],
+    predecessors: dict[EndpointKey, set[EndpointKey]],
+) -> list[EndpointKey]:
+    """Order faces so each comes after the faces below it.
+
+    Faces caught in a cycle contradict each other and are left out.
+    """
+    remaining = {node: len(predecessors.get(node, ())) for node in nodes}
+    ready = sorted(node for node, count in remaining.items() if count == 0)
+    order: list[EndpointKey] = []
+    while ready:
+        node = ready.pop()
+        order.append(node)
+        for following in sorted(successors.get(node, ())):
+            remaining[following] -= 1
+            if remaining[following] == 0:
+                ready.append(following)
+    return order
+
+
+def space_depth(space_iri: str | None, spaces: dict[str, SpotAmSpace]) -> int:
+    depth = 0
+    visited: set[str] = set()
+    current = space_iri
+    while current is not None and current not in visited and current in spaces:
+        visited.add(current)
+        depth += 1
+        current = spaces[current].parent_iri
+    return depth
+
+
+def solve_sibling_group(
+    parent_iri: str | None,
+    group: list[str],
     spaces: dict[str, SpotAmSpace],
     mappings_by_space: dict[str, list[BoundaryPointMapping]],
 ) -> dict[str, SpotAmPlacement]:
-    """Work out the region each approximately located space occupies.
+    """Place the spaces of one parent that SPOT-AM locates, in one pass.
 
-    Axes with no relation keep the parent's full extent, so a damage known only
-    to be "in the back" still spans the room's width and height.
+    Relations to a sibling that has not been placed yet are skipped, except
+    ``meet*``, which ties the two spaces to one face either way.
     """
-    placements: dict[str, SpotAmPlacement] = {}
     world_matrices = resolve_world_matrices(spaces)
+    members = set(group)
+    solver = EndpointSolver()
+    constrained_axes: dict[str, set[str]] = {space_iri: set() for space_iri in group}
 
-    for space_iri, mappings in mappings_by_space.items():
-        space = spaces.get(space_iri)
-        if space is None or not mappings:
-            continue
+    for space_iri in group:
+        for mapping in mappings_by_space[space_iri]:
+            frame = resolve_directional_frame(mapping.target_iri, spaces)
+            axis_name = relation_axis_name(mapping.relation_name, frame)
+            if axis_name is None:
+                continue
+            if mapping.source_end is not None and mapping.source_end[0] == axis_name:
+                ends = (mapping.source_end[1],)
+            else:
+                ends = (LOWER_END, UPPER_END)
+            keys = [(space_iri, axis_name, end) for end in ends]
+            if mapping.flattens_axis:
+                keys = [(space_iri, axis_name, LOWER_END), (space_iri, axis_name, UPPER_END)]
+                solver.union(*keys)
 
-        parent_iri = space.parent_iri
-        default_bbox = (
-            extent_in_reference_frame(
-                parent_iri, parent_iri, spaces, world_matrices
+            face = (
+                relation_face(mapping.relation_name, frame)
+                if mapping.target_iri in members
+                else None
             )
+            if face is not None:
+                face_key = (mapping.target_iri, face[0], face[1])
+                for key in keys:
+                    solver.union(key, face_key)
+                constrained_axes[space_iri].add(axis_name)
+                constrained_axes[mapping.target_iri].add(face[0])
+                continue
+
+            target_bbox = extent_in_reference_frame(
+                mapping.target_iri, parent_iri, spaces, world_matrices
+            )
+            if target_bbox is None:
+                continue
+            interval = relation_interval(
+                mapping.relation_name,
+                target_bbox,
+                frame,
+                mapping.normalized_coordinate,
+            )
+            if interval is None:
+                continue
+            for key in keys:
+                solver.add_interval(
+                    key, interval, dependent=mapping.target_iri in members
+                )
+            constrained_axes[space_iri].add(axis_name)
+
+    ranges = solver.solve()
+    placements: dict[str, SpotAmPlacement] = {}
+
+    for space_iri in group:
+        mappings = mappings_by_space[space_iri]
+        default_bbox = (
+            extent_in_reference_frame(parent_iri, parent_iri, spaces, world_matrices)
             if parent_iri is not None
             else None
         )
@@ -361,48 +651,84 @@ def derive_spot_am_placements(
         if default_bbox is None:
             continue
 
-        intervals_by_axis: dict[str, list[AxisInterval]] = {
-            axis_name: [] for axis_name in AXIS_NAMES
-        }
-
-        for mapping in mappings:
-            target_bbox = extent_in_reference_frame(
-                mapping.target_iri, parent_iri, spaces, world_matrices
-            )
-            if target_bbox is None:
-                continue
-
-            frame = resolve_directional_frame(mapping.target_iri, spaces)
-            interval = relation_interval(
-                mapping.relation_name,
-                target_bbox,
-                frame,
-                mapping.normalized_coordinate,
-            )
-            if interval is None:
-                continue
-            intervals_by_axis[interval.axis_name].append(interval)
-
         min_corner = [default_bbox[0], default_bbox[1], default_bbox[2]]
         max_corner = [default_bbox[3], default_bbox[4], default_bbox[5]]
+        has_any_range = False
 
-        has_any_interval = False
-        for axis_name in AXIS_NAMES:
-            intervals = intervals_by_axis[axis_name]
-            if not intervals:
+        for axis_name in sorted(constrained_axes[space_iri]):
+            lower_range = ranges.get((space_iri, axis_name, LOWER_END))
+            upper_range = ranges.get((space_iri, axis_name, UPPER_END))
+            if lower_range is None and upper_range is None:
                 continue
-            has_any_interval = True
+            # With one end unknown, the space spans the region of the other.
+            lower_range = lower_range or upper_range
+            upper_range = upper_range or lower_range
+            low, high = lower_range[0], upper_range[1]
             index = axis_index(axis_name)
-            min_corner[index] = min(interval.lower_value for interval in intervals)
-            max_corner[index] = max(interval.upper_value for interval in intervals)
+            min_corner[index] = min(low, high)
+            max_corner[index] = max(low, high)
+            has_any_range = True
 
-        if not has_any_interval:
+        if not has_any_range:
             continue
-
         placements[space_iri] = SpotAmPlacement(
             space_iri=space_iri,
             min_corner=(min_corner[0], min_corner[1], min_corner[2]),
             max_corner=(max_corner[0], max_corner[1], max_corner[2]),
         )
+
+    return placements
+
+
+def placement_signature(
+    placements: dict[str, SpotAmPlacement],
+) -> dict[str, tuple[float, ...]]:
+    return {
+        space_iri: tuple(
+            round(value, 9) for value in (*placement.min_corner, *placement.max_corner)
+        )
+        for space_iri, placement in placements.items()
+    }
+
+
+def derive_spot_am_placements(
+    spaces: dict[str, SpotAmSpace],
+    mappings_by_space: dict[str, list[BoundaryPointMapping]],
+) -> dict[str, SpotAmPlacement]:
+    """Work out the region each approximately located space occupies.
+
+    Axes with no relation keep the parent's full extent, so a damage known only
+    to be "in the back" still spans the room's width and height. Siblings are
+    solved together and re-solved until stable, so a section that lies "in the
+    middle of span 2" can follow span 2 once the spans are placed. Parents are
+    placed before their children.
+    """
+    # Work on copies: placed siblings feed the next pass through their boxes.
+    working = {space_iri: replace(space) for space_iri, space in spaces.items()}
+    groups: dict[str | None, list[str]] = {}
+    for space_iri, mappings in mappings_by_space.items():
+        if space_iri in working and mappings:
+            groups.setdefault(working[space_iri].parent_iri, []).append(space_iri)
+
+    placements: dict[str, SpotAmPlacement] = {}
+    for parent_iri in sorted(
+        groups, key=lambda value: (space_depth(value, working), value or "")
+    ):
+        group = groups[parent_iri]
+        group_placements: dict[str, SpotAmPlacement] = {}
+        for _ in range(len(group) + 1):
+            solved = solve_sibling_group(parent_iri, group, working, mappings_by_space)
+            for space_iri, placement in solved.items():
+                working[space_iri].local_bbox = placement.centered_local_bbox()
+                working[space_iri].local_matrix = Matrix.Translation(
+                    Vector(placement.center)
+                )
+            stable = placement_signature(solved) == placement_signature(
+                group_placements
+            )
+            group_placements = solved
+            if stable:
+                break
+        placements.update(group_placements)
 
     return placements

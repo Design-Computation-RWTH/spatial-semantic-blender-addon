@@ -238,6 +238,27 @@ The folder import uses the same current-state rules as the Graph Gateway. It mer
 The importer recreates the SPOT helper wireframes and hierarchy for checking. It uses the first `rdfs:label` when present. Otherwise, it uses the Turtle local name of the resource. When a space has multiple bounding boxes, the importer uses their enclosing axis-aligned bounding box. Multiple labels or bounding boxes produce import warnings. The importer does not recreate the original source meshes.
 If a space has no exported bounding box, the importer uses a tiny placeholder wireframe only for Blender visualization and keeps the missing bbox metadata implicit.
 
+#### Import into an existing AssetSpace
+
+Some datasets locate their spaces only with SPOT-AM relations, for example "Span_2 meets the rear of Span_1", and give the root AssetSpace no bounding box. SPOT-AM relations are fractions of a target's extent, so without a box every space stays at the origin.
+
+To give the relations an extent:
+
+1. Make the AssetSpace helper of your model active, for example one built from an IFC file.
+2. Set its axis directions in the SPOT panel (which axis points to the rear, left, and top).
+3. In the import file browser, select `Place Inside Active AssetSpace`.
+
+Run `Build` again first if the helper was built before scale handling was fixed: a helper built from a scaled object, such as a stretched cube, keeps a box of about 2 m in a stretched frame. The build now moves the source object's scale into the helper's box.
+
+The active helper replaces the imported root AssetSpace. Its box and axis directions resolve every relation to the root. The imported spaces become its children. The rest of the helper collection stays. A repeated import replaces the helpers of the earlier import. When the root states other axis directions than the helper, the helper wins and the importer writes a warning.
+
+The importer resolves SPOT-AM relations with these rules:
+
+- `containedIn*` places a boundary point in one third of the target. `meet*` places it on a face. `disjoint*` places it in the band one third of the target's extent beyond a face.
+- Axis mappings tell which end of a space a min or max boundary point bounds. A plain `spot-am:BoundaryPoint` means the space has no extent along that axis. The importer narrows its region to the middle, so a section stays a plane and a camera stays a point.
+- Siblings that meet share a face. When the relations do not fix a face, the importer puts it at equal distances between the fixed faces on each side. For example, four spans chained from the front of a bridge to its rear split its length into four equal parts.
+- A space that appears more than once in the same kind of space gets only its first appearance. The importer writes a warning.
+
 ### IFC Bounding Box
 
 A Bonsai/IfcOpenShell import lands in its own `IfcProject/...` collection tree, separate from the `AssetSpace_...` collection `build_spot_scene.py` walks. Re-parenting a large IFC hierarchy into `AssetSpace_...` by hand does not scale, and the builder only looks _inside_ the AssetSpace collection for the geometry it needs.

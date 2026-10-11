@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import bpy
+from mathutils import Vector
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -387,9 +388,157 @@ ex:asset a spot:AssetSpace ;
     print("Dataset folder live spatial mutation import test passed")
 
 
+def world_x_range(helper: bpy.types.Object) -> tuple[float, float]:
+    xs = [(helper.matrix_world @ Vector(corner)).x for corner in helper.bound_box]
+    return round(min(xs), 3), round(max(xs), 3)
+
+
+def test_spot_am_spans_inside_existing_asset_space() -> None:
+    """Spans chained by SPOT-AM, imported into an AssetSpace already in the scene.
+
+    The imported bridge has no bounding box, so the existing AssetSpace lends
+    its 90 m length. Only the outer faces of the outer spans are tied to the
+    bridge; the faces between spans are only said to meet, so the spans split
+    the length evenly. A section meets the rear of span 1 with a plain
+    boundary point and so sits on the face between spans 1 and 2. A detail
+    lies in the rear third and stays a plane.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+    anchor_turtle = """\
+@prefix ex: <https://example.org/model/> .
+@prefix spot: <https://w3id.org/spot#> .
+@prefix spot-sg: <https://w3id.org/spot/sg#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:model a spot:AssetSpace ;
+    rdfs:label "Model" ;
+    spot-sg:hasBoundingBox "[0,0,0,90,10,20]"^^spot-sg:boundingBoxArray .
+"""
+    span_statements = []
+    for index in (1, 2, 3):
+        span = f"ex:Span_{index}"
+        before = "ex:Bridge" if index == 1 else f"ex:Span_{index - 1}"
+        after = "ex:Bridge" if index == 3 else f"ex:Span_{index + 1}"
+        min_relation = "reloc:meetFront" if index == 1 else "reloc:meetRear"
+        max_relation = "reloc:meetRear" if index == 3 else "reloc:meetFront"
+        span_statements.append(f"""
+{span} a spot:VolumeSpace ;
+    rdfs:label "Span_{index}" ;
+    spot:hasAppearance {span}_in_Bridge ;
+    spot:hasXAxis {span}_Axis_X .
+{span}_Axis_X a spot:Axis ;
+    spot-am:hasBoundaryPoint {span}_X_Min, {span}_X_Max .
+{span}_X_Min a spot-am:MinBoundaryPoint .
+{span}_X_Max a spot-am:MaxBoundaryPoint .
+{span}_in_Bridge a spot:AssetAppearance ;
+    spot:appearsIn ex:Bridge ;
+    spot-am:hasAxisMapping {span}_AM_X ;
+    spot-am:hasBoundaryPointMapping {span}_BPM_Min, {span}_BPM_Max .
+{span}_AM_X a spot-am:AxisMapping ;
+    spot-am:hasAxisRelationType spot-am:Codirectional ;
+    spot-am:hasSourceAxis {span}_Axis_X ;
+    spot-am:hasTargetAxis ex:Bridge_Axis_X .
+{span}_BPM_Min a spot-am:BoundaryPointMapping ;
+    {min_relation} {before} ;
+    spot-am:hasSourcePoint {span}_X_Min .
+{span}_BPM_Max a spot-am:BoundaryPointMapping ;
+    {max_relation} {after} ;
+    spot-am:hasSourcePoint {span}_X_Max .
+""")
+    turtle = """\
+@prefix ex: <http://example.org/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix reloc: <https://w3id.org/reloc#> .
+@prefix spot: <https://w3id.org/spot#> .
+@prefix spot-am: <https://w3id.org/spot/am#> .
+
+ex:Bridge a spot:AssetSpace ;
+    rdfs:label "Bridge" ;
+    spot:hasXAxis ex:Bridge_Axis_X ;
+    spot:hasYAxis ex:Bridge_Axis_Y ;
+    spot:hasZAxis ex:Bridge_Axis_Z .
+ex:Bridge_Axis_X a spot:Axis ; spot:hasDirection spot:Rear .
+ex:Bridge_Axis_Y a spot:Axis ; spot:hasDirection spot:Left .
+ex:Bridge_Axis_Z a spot:Axis ; spot:hasDirection spot:Top .
+
+ex:Section a spot:AreaSpace ;
+    rdfs:label "Section" ;
+    spot:hasAppearance ex:Section_in_Bridge ;
+    spot:hasZAxis ex:Section_Axis_Z .
+ex:Section_Axis_Z a spot:Axis ; spot-am:hasBoundaryPoint ex:Section_Z_BP .
+ex:Section_Z_BP a spot-am:BoundaryPoint .
+ex:Section_in_Bridge a spot:AssetAppearance ;
+    spot:appearsIn ex:Bridge ;
+    spot-am:hasBoundaryPointMapping ex:Section_BPM_Z .
+ex:Section_BPM_Z a spot-am:BoundaryPointMapping ;
+    reloc:meetRear ex:Span_1 ;
+    spot-am:hasSourcePoint ex:Section_Z_BP .
+
+ex:Detail a spot:AreaSpace ;
+    rdfs:label "Detail" ;
+    spot:hasAppearance ex:Detail_in_Bridge ;
+    spot:hasZAxis ex:Detail_Axis_Z .
+ex:Detail_Axis_Z a spot:Axis ; spot-am:hasBoundaryPoint ex:Detail_Z_BP .
+ex:Detail_Z_BP a spot-am:BoundaryPoint .
+ex:Detail_in_Bridge a spot:AssetAppearance ;
+    spot:appearsIn ex:Bridge ;
+    spot-am:hasBoundaryPointMapping ex:Detail_BPM_Z .
+ex:Detail_BPM_Z a spot-am:BoundaryPointMapping ;
+    reloc:containedInRear ex:Bridge ;
+    spot-am:hasSourcePoint ex:Detail_Z_BP .
+""" + "".join(span_statements)
+
+    with tempfile.TemporaryDirectory(prefix="spot-am-anchor-") as directory:
+        anchor_path = Path(directory) / "model.ttl"
+        anchor_path.write_text(anchor_turtle, encoding="utf8")
+        input_path = Path(directory) / "bridge.ttl"
+        input_path.write_text(turtle, encoding="utf8")
+        import_scene_graph_turtle(anchor_path)
+        anchor = next(obj for obj in bpy.data.objects if obj.get(PROP_HELPER))
+        anchor.spot_asset_axis_x_direction = "Rear"
+        anchor.spot_asset_axis_y_direction = "Left"
+        anchor.spot_asset_axis_z_direction = "Top"
+
+        result = import_scene_graph_turtle(input_path, anchor_helper=anchor)
+        # Importing again replaces the helpers of the first import.
+        result = import_scene_graph_turtle(input_path, anchor_helper=anchor)
+
+        def helper(label: str) -> bpy.types.Object:
+            return next(
+                obj
+                for obj in bpy.data.objects
+                if obj.get(PROP_HELPER) and obj[PROP_LABEL] == label
+            )
+
+        assert result["helper_count"] == 6, result
+        assert result["root_helper_name"] == anchor.name
+        for label in ("Span_1", "Span_2", "Span_3", "Section"):
+            assert helper(label).parent == anchor
+        assert world_x_range(helper("Span_1")) == (0.0, 30.0)
+        assert world_x_range(helper("Span_2")) == (30.0, 60.0)
+        assert world_x_range(helper("Span_3")) == (60.0, 90.0)
+        assert world_x_range(helper("Section")) == (30.0, 30.0)
+        # A plain boundary point flattens its axis: the detail is a plane in
+        # the middle of the rear third, not a slab filling that third.
+        assert world_x_range(helper("Detail")) == (75.0, 75.0)
+        assert not any("axis directions" in w for w in result["warnings"])
+
+        # The anchor's frame wins over the imported root's: with its X axis
+        # pointing to the front, the bridge's rear lies at the low end of X.
+        anchor.spot_asset_axis_x_direction = "Front"
+        result = import_scene_graph_turtle(input_path, anchor_helper=anchor)
+        assert world_x_range(helper("Span_1")) == (60.0, 90.0)
+        assert world_x_range(helper("Span_3")) == (0.0, 30.0)
+        assert world_x_range(helper("Section")) == (60.0, 60.0)
+        assert any("axis directions" in w for w in result["warnings"])
+    print("SPOT-AM spans inside an existing AssetSpace test passed")
+
+
 if __name__ == "__main__":
     main()
     test_document_appearances_do_not_win()
     test_spot_am_fuzzy_placement()
     test_spot_am_relation_to_other_space()
     test_dataset_folder_imports_live_spatial_mutations()
+    test_spot_am_spans_inside_existing_asset_space()

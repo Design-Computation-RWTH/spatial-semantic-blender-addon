@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import bpy
 from mathutils import Matrix, Vector
@@ -22,20 +24,30 @@ from spatial_semantic_addon.build_spot_scene import (
 from spatial_semantic_addon.export_spot_ttl import (
     LOCAL_TERM_MARKER,
     export_distribution_block,
+    export_helper_scene,
+    export_ifc_model_document_appearance_block,
+    export_ifc_model_document_space_block,
+    exported_matrix_literal,
     export_space_axis_blocks,
     export_space_block,
 )
+from spatial_semantic_addon.import_spot_ttl import import_scene_graph_turtle
 from spatial_semantic_addon.spot_blender_common import (
     PROP_AM_ENABLED,
+    PROP_BOT_CLASS,
     PROP_HELPER,
+    PROP_IFC_FILE,
     PROP_LABEL,
     PROP_LOCAL_BBOX,
+    PROP_PLAN_KIND,
+    PROP_REPRESENTS_LINKS,
     PROP_SOURCE_ASSET_PATH,
     PROP_SOURCE_IFC_CLASS,
     PROP_SPOT_CLASS,
     bbox_vertices,
     collection_object_named_like_collection,
     human_name,
+    matrix_to_column_major_literal,
     parse_name_semantics,
 )
 
@@ -243,12 +255,12 @@ def test_ifc_tag_overrides_the_prefix_inference() -> None:
     print("IFC tag override test passed")
 
 
-def test_ifc_bounding_box_includes_the_root_point() -> None:
+def test_ifc_bounding_box_spans_only_the_geometry() -> None:
     """
-    The box spans the geometry unioned with the IFC root point, not the
-    geometry alone. A box that holds its own origin satisfies
-    `min <= 0 <= max` on every axis, which is what makes it a containment
-    test in IFC coordinates near the origin.
+    The box spans the placed geometry alone. The IFC root point does not
+    stretch it, and neither do type objects, which are metadata rather than
+    placed geometry. The origin still sits on the IFC root, so the box carries
+    the IFC frame even though it does not contain its own origin.
     """
     bpy.ops.wm.read_factory_settings(use_empty=True)
     ifc_collection = bpy.data.collections.new("IfcProject/My Project")
@@ -258,10 +270,15 @@ def test_ifc_bounding_box_includes_the_root_point() -> None:
     ifc_collection.objects.link(ifc_root)
     ifc_root.location = (500.0, 500.0, 0.0)
 
-    # Geometry sits far from the root, so a box around the geometry alone
-    # would not reach the root and the assertion below would be vacuous.
+    # Geometry sits far from the root, so a box that reached the root would
+    # fail the extent assertion below.
     box_object("IfcWall/Wall 1", ifc_collection, (0.0, 0.0, 0.0))
     box_object("IfcWall/Wall 2", ifc_collection, (2.0, 0.0, 0.0))
+
+    # A type object far away, the way Bonsai keeps types beside the model.
+    type_collection = bpy.data.collections.new("IfcTypeProduct/Wall Types")
+    ifc_collection.children.link(type_collection)
+    box_object("IfcWallType/Basic Wall", type_collection, (-1000.0, 0.0, 0.0))
     bpy.context.view_layer.update()
 
     root_object = collection_object_named_like_collection(ifc_collection)
@@ -281,20 +298,11 @@ def test_ifc_bounding_box_includes_the_root_point() -> None:
         0.0,
     )
 
-    # The box spans the geometry and the root point.
+    # The box spans the two walls and nothing else.
     minimum, maximum = world_bbox_of_object(bbox_object)
     assert minimum == [-0.5, -0.5, -0.5], minimum
-    assert maximum == [500.0, 500.0, 0.5], maximum
-
-    # Stated in the box's own local frame: it contains its own origin.
-    local_corners = [vertex.co for vertex in bbox_object.data.vertices]
-    local_min = [min(c[axis] for c in local_corners) for axis in range(3)]
-    local_max = [max(c[axis] for c in local_corners) for axis in range(3)]
-    assert all(local_min[axis] <= 0 <= local_max[axis] for axis in range(3)), (
-        local_min,
-        local_max,
-    )
-    print("IFC bounding box root inclusion test passed")
+    assert maximum == [2.5, 0.5, 0.5], maximum
+    print("IFC bounding box geometry-only extent test passed")
 
 
 def test_dragging_the_bounding_box_into_asset_space_converts_it_verbatim() -> None:
@@ -426,17 +434,10 @@ def test_ifc_model_space_keeps_an_asymmetric_box_around_the_ifc_origin() -> None
     ) == (0.0, 0.0, 0.0), box_helper.matrix_world.translation
 
     # The exported box is the one the graph carries, and it is asymmetric:
-    # it reaches out to the geometry on +X while holding its own origin.
+    # it covers only the geometry on +X, away from its own origin.
     local_bbox = [round(float(value), 6) for value in box_helper[PROP_LOCAL_BBOX]]
-    assert local_bbox[0] == 0.0, local_bbox
-    assert local_bbox[3] > 20.0, local_bbox
-    assert local_bbox[0] != -local_bbox[3], local_bbox
-
-    # It still contains its own origin on every axis, so the containment test
-    # near the IFC origin needs no special case.
-    assert all(local_bbox[axis] <= 0 <= local_bbox[axis + 3] for axis in range(3)), (
-        local_bbox
-    )
+    assert local_bbox[0] == 9.5, local_bbox
+    assert local_bbox[3] == 20.5, local_bbox
     print("IFC model space asymmetric box test passed")
 
 
@@ -659,12 +660,122 @@ def test_damage_represents_no_bot_space() -> None:
     print("Damage represents no BOT space test passed")
 
 
-def test_ifc_model_space_owns_the_file_as_a_dataset() -> None:
+def test_bot_space_is_never_assigned_by_position() -> None:
     """
-    The whole-model box carries the IFC file: the space represents a
-    `dcat:Dataset` whose `dcat:Distribution` points at the served `.ifc`. The
-    distribution belongs to the dataset rather than to the space, matching the
-    shape a photograph already uses.
+    A space is a `bot:Space` only when its name says so: an explicit `::BOT=`
+    tag or an `IfcSpace/` prefix. Plans and untagged spaces get no BOT class.
+    """
+    plan = parse_name_semantics("Floorplan_EG")
+    assert plan.plan_kind == "floorplan", plan.plan_kind
+    assert plan.bot_class is None, plan.bot_class
+
+    room = parse_name_semantics("IfcSpace/Room 1")
+    assert room.bot_class == "Space", room.bot_class
+
+    tagged = parse_name_semantics("EntitySpace_Zone::BOT=Space")
+    assert tagged.bot_class == "Space", tagged.bot_class
+    assert parse_name_semantics("EntitySpace_Zone").bot_class is None
+    print("BOT space by name only test passed")
+
+
+def build_scene_with_plan() -> bpy.types.Collection:
+    """The IFC-like scene plus a floor plan beside the storey and a room in it."""
+    building_collection = build_ifc_like_scene(asset_root_location=(0.0, 0.0, 0.0))
+    storey_collection = building_collection.children[0]
+    box_object("IfcSpace/Room 1", storey_collection, (6.0, 0.0, 0.0))
+    plan_collection = bpy.data.collections.new("Floorplan_EG")
+    building_collection.children.link(plan_collection)
+    rectangle_object(
+        "Sheet",
+        plan_collection,
+        [(0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (4.0, 3.0, 0.0), (0.0, 3.0, 0.0)],
+    )
+    bpy.context.view_layer.update()
+    return building_collection
+
+
+def test_plan_represents_a_linked_storey() -> None:
+    """
+    A plan carries no BOT class of its own, but can be linked to the storey it
+    stands for: it then `spot:represents` the storey's BOT referent, which
+    stays owned by the storey. The link survives a helper rebuild and an
+    import round trip.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+    build_scene_with_plan()
+    result = build_helper_scene(visible_only=False)
+    helper_collection = bpy.data.collections[result["helper_collection_name"]]
+
+    (plan_helper,) = [
+        obj for obj in helper_collection.objects if obj.get(PROP_PLAN_KIND)
+    ]
+    assert PROP_BOT_CLASS not in plan_helper, plan_helper[PROP_BOT_CLASS]
+    assert "::BOT=" not in plan_helper.name, plan_helper.name
+    (room_helper,) = [
+        obj for obj in helper_collection.objects if "room-1" in obj.name
+    ]
+    assert room_helper[PROP_BOT_CLASS] == "Space", room_helper.name
+    (storey_helper,) = [
+        obj
+        for obj in helper_collection.objects
+        if obj.get(PROP_BOT_CLASS) == "Storey"
+    ]
+
+    # Both are built from collections, so the link is held by the plan
+    # collection and names the storey collection, not the helpers.
+    bpy.context.view_layer.objects.active = plan_helper
+    bpy.context.scene.spot_tools_settings.represents_candidate = storey_helper
+    assert bpy.ops.spot.add_represents_link() == {"FINISHED"}
+    plan_collection = bpy.data.collections["Floorplan_EG"]
+    (link,) = getattr(plan_collection, PROP_REPRESENTS_LINKS)
+    assert link.collection == bpy.data.collections[
+        "IfcBuildingStorey/Level 1::SPOT=VolumeSpace"
+    ], link.collection
+
+    build_helper_scene(visible_only=False)
+    helper_collection = bpy.data.collections[result["helper_collection_name"]]
+
+    with tempfile.TemporaryDirectory(prefix="spot-represents-test-") as directory:
+        output_path = Path(directory) / "scene.ttl"
+        export_helper_scene(
+            helper_collection.name, output_path, local_prefix="ex"
+        )
+        turtle = output_path.read_text(encoding="utf8")
+
+        blocks = turtle.split("\n\n")
+        plan_block = next(
+            block for block in blocks if "a spot:HorizontalAreaSpace" in block
+        )
+        plan_referents = [
+            line.split("spot:represents ", 1)[1].rstrip(" ;.")
+            for line in plan_block.splitlines()
+            if "spot:represents " in line
+        ]
+        assert len(plan_referents) == 1, plan_block
+        assert f"{plan_referents[0]} a bot:Storey" in turtle, plan_referents
+        assert turtle.count("a bot:Space") == 1, turtle
+
+        import_scene_graph_turtle(output_path)
+
+    imported = [obj for obj in bpy.data.objects if obj.get(PROP_HELPER)]
+    (imported_plan,) = [
+        obj for obj in imported if obj.get(PROP_SPOT_CLASS) == "HorizontalAreaSpace"
+    ]
+    (imported_storey,) = [
+        obj for obj in imported if obj.get(PROP_BOT_CLASS) == "Storey"
+    ]
+    assert PROP_BOT_CLASS not in imported_plan, imported_plan[PROP_BOT_CLASS]
+    links = [entry.object for entry in getattr(imported_plan, PROP_REPRESENTS_LINKS)]
+    assert links == [imported_storey], links
+    print("Plan represents a linked storey test passed")
+
+
+def test_ifc_model_file_is_a_document_space() -> None:
+    """
+    The model file is a Document Space that owns the distribution, as a plan
+    sheet does. The whole-model Volume Space represents no `dcat:Dataset`
+    and owns no distribution of its own.
     """
     bpy.ops.wm.read_factory_settings(use_empty=True)
     spatial_semantic_addon.register()
@@ -678,24 +789,91 @@ def test_ifc_model_space_owns_the_file_as_a_dataset() -> None:
     helper[PROP_LABEL] = "domhof-ifc-project"
     helper[PROP_SOURCE_IFC_CLASS] = "IfcProject"
     helper[PROP_SOURCE_ASSET_PATH] = "data/ifc/domhof-ifc-project.ifc"
+    helper[PROP_LOCAL_BBOX] = [-1.0, -2.0, 0.0, 10.0, 20.0, 3.0]
 
     suffixes = {helper.name: "volumespace-domhof-ifc-project"}
     block = export_distribution_block(helper, suffixes, "/assets")
-
     assert (
-        f"volumespace-domhof-ifc-project spot:represents "
-        f"{LOCAL_TERM_MARKER}model_volumespace-domhof-ifc-project ." in block
+        f"{LOCAL_TERM_MARKER}documentspace-domhof-ifc-project dcat:distribution "
+        f"{LOCAL_TERM_MARKER}distribution_documentspace-domhof-ifc-project ." in block
     ), block
-    assert "a dcat:Dataset" in block, block
-    assert "a dcat:Distribution" in block, block
     assert "/assets/ifc/domhof-ifc-project.ifc" in block, block
     assert '"application/x-step"' in block, block
-    # The space itself owns no distribution; the dataset in between does.
+    assert "spot:represents" not in block, block
+    assert "dcat:Dataset" not in block, block
+
+    document_block = export_ifc_model_document_space_block(
+        helper, suffixes, 6, include_bbox=True, document_backed_helper_names=set()
+    )
     assert (
-        f"{LOCAL_TERM_MARKER}volumespace-domhof-ifc-project dcat:distribution"
-        not in block
-    ), block
-    print("IFC model space distribution test passed")
+        f"{LOCAL_TERM_MARKER}documentspace-domhof-ifc-project a spot:DocumentSpace ;"
+        in document_block
+    ), document_block
+    assert "qudt:hasUnit unit:M ;" in document_block, document_block
+    assert '"[-1,-2,0,10,20,3]"^^spot-sg:boundingBoxArray' in document_block, (
+        document_block
+    )
+    for axis_name in ("X", "Y", "Z"):
+        assert (
+            f"spot:has{axis_name}Axis {LOCAL_TERM_MARKER}"
+            f"documentspace-domhof-ifc-project_{axis_name.lower()}_axis"
+        ) in document_block, document_block
+    # The image frame of a plan sheet is not the frame of a model file.
+    assert "spot:hasDirection" not in document_block, document_block
+
+    appearance_block = export_ifc_model_document_appearance_block(
+        helper, suffixes, include_transform=True
+    )
+    app_id = (
+        "appearance_volumespace-domhof-ifc-project_in_"
+        "documentspace-domhof-ifc-project"
+    )
+    assert (
+        f"{LOCAL_TERM_MARKER}volumespace-domhof-ifc-project spot:hasAppearance "
+        f"{LOCAL_TERM_MARKER}{app_id} ." in appearance_block
+    ), appearance_block
+    assert "a spot:DocumentAppearance ;" in appearance_block, appearance_block
+    assert (
+        '"[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]"^^gom:columnMajorArray'
+        in appearance_block
+    ), appearance_block
+    print("IFC model file document space test passed")
+
+
+def test_ifc_model_export_links_the_space_to_its_file() -> None:
+    """
+    In a full export the whole-model Volume Space keeps its Asset Appearance
+    and gains one Document Appearance in the model file, which owns the
+    distribution.
+    """
+    building_collection, _ifc_collection = build_asset_space_with_disconnected_ifc()
+    bpy.ops.spot.create_ifc_bounding_box()
+    build_helper_scene(visible_only=False)
+
+    with tempfile.TemporaryDirectory() as directory:
+        output_path = Path(directory) / "model.ttl"
+        export_helper_scene(output_path=output_path, local_prefix="ex")
+        turtle = output_path.read_text(encoding="utf8")
+
+    assert "dcat:Dataset" not in turtle, turtle
+    assert "model_" not in turtle, turtle
+    assert (
+        "ex:documentspace-my-project dcat:distribution "
+        "ex:distribution_documentspace-my-project ." in turtle
+    ), turtle
+    assert "ex:volumespace-my-project dcat:distribution" not in turtle, turtle
+    appearances = [
+        line
+        for line in turtle.splitlines()
+        if line.startswith("ex:volumespace-my-project spot:hasAppearance ")
+    ]
+    assert len(appearances) == 2, appearances
+    assert (
+        "ex:volumespace-my-project spot:hasAppearance "
+        "ex:appearance_volumespace-my-project_in_documentspace-my-project ."
+        in appearances
+    ), appearances
+    print("IFC model export document appearance test passed")
 
 
 def test_ifc_model_asset_path_is_inferred_for_the_project_box_only() -> None:
@@ -712,6 +890,204 @@ def test_ifc_model_asset_path_is_inferred_for_the_project_box_only() -> None:
     print("IFC model asset path inference test passed")
 
 
+def build_asset_space_with_disconnected_ifc() -> tuple[
+    bpy.types.Collection, bpy.types.Collection
+]:
+    """
+    An AssetSpace scene beside a disconnected Bonsai-style IFC import whose
+    root sits off-site, as an IFC exported in survey coordinates does.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+
+    building_collection = bpy.data.collections.new("AssetSpace_Building")
+    bpy.context.scene.collection.children.link(building_collection)
+    storey_collection = bpy.data.collections.new(
+        "IfcBuildingStorey/Level 1::SPOT=VolumeSpace"
+    )
+    building_collection.children.link(storey_collection)
+    box_object("VolumeSpace_Room::BOT=Space", storey_collection, (0.0, 0.0, 0.0))
+
+    ifc_collection = bpy.data.collections.new("IfcProject/My Project")
+    bpy.context.scene.collection.children.link(ifc_collection)
+    ifc_root = bpy.data.objects.new("IfcProject/My Project", None)
+    ifc_collection.objects.link(ifc_root)
+    ifc_root.location = (500.0, 500.0, 0.0)
+    box_object("IfcWall/Wall 1", ifc_collection, (501.0, 500.0, 0.0))
+    box_object("IfcWall/Wall 2", ifc_collection, (503.0, 500.0, 0.0))
+
+    bpy.context.view_layer.update()
+    return building_collection, ifc_collection
+
+
+def test_create_ifc_bounding_box_sorts_into_the_asset_space() -> None:
+    """
+    The operator links the box straight into the AssetSpace collection, so no
+    manual drag is needed, and selects it so it can be moved into place. A
+    second run finds that box again instead of adding a duplicate that would
+    export the model a second time at its original position.
+    """
+    building_collection, ifc_collection = build_asset_space_with_disconnected_ifc()
+
+    result = bpy.ops.spot.create_ifc_bounding_box()
+    assert result == {"FINISHED"}, result
+
+    (bbox_object,) = [
+        obj for obj in building_collection.objects if "my-project" in obj.name
+    ]
+    assert bbox_object.name not in ifc_collection.all_objects
+    assert "IFC Bounding Boxes" not in bpy.data.collections
+    assert bpy.context.view_layer.objects.active == bbox_object
+    assert bbox_object.select_get()
+
+    bbox_object.location = (10.0, 0.0, 0.0)
+    result = bpy.ops.spot.create_ifc_bounding_box()
+    assert result == {"FINISHED"}, result
+    boxes = [obj for obj in bpy.data.objects if "my-project" in obj.name]
+    assert boxes == [bbox_object], boxes
+    assert tuple(bbox_object.location) == (10.0, 0.0, 0.0), bbox_object.location
+    print("IFC bounding box sorts into asset space test passed")
+
+
+def test_create_ifc_bounding_box_falls_back_without_an_asset_space() -> None:
+    """Without an AssetSpace collection the box goes to the fallback collection."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+    ifc_collection = bpy.data.collections.new("IfcProject/My Project")
+    bpy.context.scene.collection.children.link(ifc_collection)
+    box_object("IfcWall/Wall 1", ifc_collection, (0.0, 0.0, 0.0))
+    bpy.context.view_layer.update()
+
+    result = bpy.ops.spot.create_ifc_bounding_box()
+    assert result == {"FINISHED"}, result
+    fallback = bpy.data.collections["IFC Bounding Boxes"]
+    assert [obj.name for obj in fallback.objects] == [
+        "VolumeSpace_my-project::IFC=IfcProject"
+    ], [obj.name for obj in fallback.objects]
+    print("IFC bounding box fallback collection test passed")
+
+
+def test_moved_ifc_bounding_box_exports_its_translation() -> None:
+    """
+    Moving the box by hand places the whole IFC model in the asset space. The
+    build keeps the box origin on the moved IFC root, and the export states
+    that placement relative to the asset space as the model's transformation
+    matrix.
+    """
+    building_collection, _ifc_collection = build_asset_space_with_disconnected_ifc()
+    bpy.ops.spot.create_ifc_bounding_box()
+    (bbox_object,) = [
+        obj for obj in building_collection.objects if "my-project" in obj.name
+    ]
+    local_bbox_before = [round(value, 6) for value in bbox_object.bound_box[0]]
+
+    # The manual move: from the survey position next to the room.
+    bbox_object.location = (3.0, 4.0, 0.0)
+    bpy.context.view_layer.update()
+
+    result = build_helper_scene(visible_only=False)
+    helper_collection = bpy.data.collections[result["helper_collection_name"]]
+    (box_helper,) = [
+        obj for obj in helper_collection.objects if "my-project" in obj.name
+    ]
+    assert box_helper[PROP_SPOT_CLASS] == "VolumeSpace", box_helper[PROP_SPOT_CLASS]
+    assert box_helper[PROP_SOURCE_IFC_CLASS] == "IfcProject"
+
+    # The helper origin is the moved IFC root, and the box keeps its extent.
+    assert tuple(round(value, 6) for value in box_helper.matrix_world.translation) == (
+        3.0,
+        4.0,
+        0.0,
+    ), box_helper.matrix_world.translation
+    assert [round(value, 6) for value in box_helper[PROP_LOCAL_BBOX][:3]] == (
+        local_bbox_before
+    ), (list(box_helper[PROP_LOCAL_BBOX]), local_bbox_before)
+
+    # The exported matrix is that placement relative to the asset space.
+    asset_helper = box_helper.parent
+    assert asset_helper[PROP_SPOT_CLASS] == "AssetSpace", asset_helper[PROP_SPOT_CLASS]
+    expected = asset_helper.matrix_world.inverted() @ Matrix.Translation((3.0, 4.0, 0.0))
+    literal = exported_matrix_literal(box_helper, asset_helper, 6, set())
+    assert literal == matrix_to_column_major_literal(expected, 6), literal
+    print("Moved IFC bounding box translation export test passed")
+
+
+def test_ifc_file_name_drives_the_exported_distribution() -> None:
+    """
+    The `IfcProject` name is often an export default such as `Projekt-001`.
+    The real file name stored on the box wins over the path guessed from that
+    label, and a space in it is percent-encoded so the IRI stays valid.
+    """
+    building_collection, ifc_collection = build_asset_space_with_disconnected_ifc()
+    bbox_object = build_ifc_bounding_box(
+        ifc_bounding_box_source_objects([ifc_collection]),
+        root_object=collection_object_named_like_collection(ifc_collection),
+        label="Projekt-001",
+        collection=building_collection,
+        ifc_file="/somewhere/Domhof 6 Export.ifc",
+    )
+    assert bbox_object[PROP_IFC_FILE] == "Domhof 6 Export.ifc", bbox_object[PROP_IFC_FILE]
+
+    result = build_helper_scene(visible_only=False)
+    helper_collection = bpy.data.collections[result["helper_collection_name"]]
+    (box_helper,) = [
+        obj for obj in helper_collection.objects if "projekt-001" in obj.name
+    ]
+    assert box_helper[PROP_SOURCE_ASSET_PATH] == "data/ifc/Domhof 6 Export.ifc", (
+        box_helper[PROP_SOURCE_ASSET_PATH]
+    )
+    block = export_distribution_block(box_helper, {box_helper.name: "model"}, "/assets")
+    assert "</assets/ifc/Domhof%206%20Export.ifc>" in block, block
+    print("IFC file name distribution test passed")
+
+
+def test_set_ifc_file_updates_the_box_and_its_helper() -> None:
+    """
+    Choosing the file later updates the box, and a helper that was built
+    already, so an export without a rebuild links the new file too.
+    """
+    building_collection, _ifc_collection = build_asset_space_with_disconnected_ifc()
+    bpy.ops.spot.create_ifc_bounding_box()
+    (bbox_object,) = [
+        obj for obj in building_collection.objects if "my-project" in obj.name
+    ]
+    result = build_helper_scene(visible_only=False)
+    helper_collection = bpy.data.collections[result["helper_collection_name"]]
+    (box_helper,) = [
+        obj for obj in helper_collection.objects if "my-project" in obj.name
+    ]
+    assert box_helper[PROP_SOURCE_ASSET_PATH] == "data/ifc/my-project.ifc"
+
+    bpy.context.view_layer.objects.active = bbox_object
+    result = bpy.ops.spot.set_ifc_file(filepath="/datasets/assets/ifc/Domhof 6.ifc")
+    assert result == {"FINISHED"}, result
+    assert bbox_object[PROP_IFC_FILE] == "Domhof 6.ifc", bbox_object[PROP_IFC_FILE]
+    assert box_helper[PROP_SOURCE_ASSET_PATH] == "data/ifc/Domhof 6.ifc", (
+        box_helper[PROP_SOURCE_ASSET_PATH]
+    )
+
+    # The helper is a valid selection too: it stands for the same box.
+    bpy.context.view_layer.objects.active = box_helper
+    result = bpy.ops.spot.set_ifc_file(filepath="/datasets/assets/ifc/Other.ifc")
+    assert result == {"FINISHED"}, result
+    assert bbox_object[PROP_IFC_FILE] == "Other.ifc", bbox_object[PROP_IFC_FILE]
+    print("Set IFC file operator test passed")
+
+
+def test_loaded_ifc_file_name_reads_bonsai() -> None:
+    """The box takes its file name from the IFC that Bonsai loaded."""
+    from spatial_semantic_addon import loaded_ifc_file_name
+
+    bonsai_context = SimpleNamespace(
+        scene=SimpleNamespace(
+            BIMProperties=SimpleNamespace(ifc_file="/data/Domhof 6 Export.ifc")
+        )
+    )
+    assert loaded_ifc_file_name(bonsai_context) == "Domhof 6 Export.ifc"
+    assert loaded_ifc_file_name(SimpleNamespace(scene=SimpleNamespace())) is None
+    print("Loaded IFC file name test passed")
+
+
 if __name__ == "__main__":
     test_document_proxy_uses_the_same_local_frame_as_other_helpers()
     test_document_proxy_origin_already_centred_is_kept()
@@ -721,10 +1097,19 @@ if __name__ == "__main__":
     test_find_ifc_project_collections_is_name_only()
     test_ifc_bounding_box_naming_follows_the_scene_convention()
     test_ifc_tag_overrides_the_prefix_inference()
-    test_ifc_bounding_box_includes_the_root_point()
+    test_ifc_bounding_box_spans_only_the_geometry()
     test_dragging_the_bounding_box_into_asset_space_converts_it_verbatim()
     test_ifc_model_space_keeps_an_asymmetric_box_around_the_ifc_origin()
     test_ifc_bounding_box_keeps_a_rotated_root_frame()
     test_damage_represents_no_bot_space()
-    test_ifc_model_space_owns_the_file_as_a_dataset()
+    test_bot_space_is_never_assigned_by_position()
+    test_plan_represents_a_linked_storey()
+    test_ifc_model_file_is_a_document_space()
+    test_ifc_model_export_links_the_space_to_its_file()
     test_ifc_model_asset_path_is_inferred_for_the_project_box_only()
+    test_create_ifc_bounding_box_sorts_into_the_asset_space()
+    test_create_ifc_bounding_box_falls_back_without_an_asset_space()
+    test_moved_ifc_bounding_box_exports_its_translation()
+    test_ifc_file_name_drives_the_exported_distribution()
+    test_set_ifc_file_updates_the_box_and_its_helper()
+    test_loaded_ifc_file_name_reads_bonsai()

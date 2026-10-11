@@ -25,6 +25,8 @@ from .spot_blender_common import (
     PROP_ASSET_AXIS_Y_DIRECTION,
     PROP_ASSET_AXIS_Z_DIRECTION,
     PROP_HELPER,
+    PROP_IFC_BOUNDING_BOX_SOURCE,
+    PROP_IFC_FILE,
     PROP_LOCAL_BBOX,
     PROP_ROLE,
     PROP_SPOT_CLASS,
@@ -67,6 +69,7 @@ from .spot_blender_common import (
     is_ifc_model_class,
     local_bbox_from_world_bbox,
     make_world_matrix,
+    object_ifc_model_asset_path,
     object_local_bbox,
     object_texture_asset_path,
     object_world_aabb,
@@ -117,7 +120,7 @@ class ElementSource:
 
     @property
     def asset_path(self) -> str | None:
-        return self.semantics.asset_path
+        return object_ifc_model_asset_path(self.source_object, self.semantics)
 
     @property
     def is_space(self) -> bool:
@@ -361,7 +364,8 @@ def source_local_frame(
     that origin to the box centre offsets every reframed Viewpoint by the
     vector from the IFC root to that centre, which for an off-origin model is
     metres. So the model box keeps the origin `build_ifc_bounding_box` gave
-    it, and keeps the asymmetric box that goes with it.
+    it, and keeps the asymmetric box that goes with it, even when that box
+    does not contain its own origin.
     """
     if is_ifc_model_class(semantics.ifc_class):
         return list(local_bbox), Vector((0.0, 0.0, 0.0))
@@ -849,6 +853,9 @@ def build_ifc_bounding_box(
     root_object: bpy.types.Object | None = None,
     label: str = "IFC Model",
     collection_name: str = "IFC Bounding Boxes",
+    collection: bpy.types.Collection | None = None,
+    source_name: str | None = None,
+    ifc_file: str | None = None,
 ) -> bpy.types.Object:
     """
     Creates one bounding-box mesh covering an IFC source hierarchy, named
@@ -860,16 +867,26 @@ def build_ifc_bounding_box(
     to move instead: a single box standing in for the whole IFC model's
     extent.
 
-    The box spans the geometry unioned with the IFC root point, and its
-    origin sits on that root. Including the root is what makes the box a
-    containment test in IFC coordinates rather than only around the
-    building: a box that holds its own origin satisfies `min <= 0 <= max` on
-    every axis, so a coordinate at or near the IFC origin needs no special
-    case.
+    The box spans the placed geometry only, skipping what the scene build
+    skips too: type objects and objects without geometry. Its origin sits on
+    the IFC root, which may lie outside the box when the model is placed away
+    from its origin. That origin carries the IFC file's frame, so moving the
+    box moves the whole model in the asset space.
+
+    The box is linked into `collection` when one is given, otherwise into the
+    collection named `collection_name`. `source_name` records which
+    `IfcProject/...` collection the box stands for, so a second run can find
+    the box again instead of adding a duplicate. `ifc_file` is the file name
+    of the model in the assets; the export links that file instead of one
+    guessed from the label.
     """
     boxes = [
         box
-        for box in (object_world_aabb(obj) for obj in source_objects)
+        for box in (
+            object_world_aabb(obj)
+            for obj in source_objects
+            if not is_excluded_object(obj)
+        )
         if box is not None
     ]
     if not boxes:
@@ -888,14 +905,13 @@ def build_ifc_bounding_box(
     else:
         root_location = Vector((0.0, 0.0, 0.0))
         root_rotation = None
-    # The root point itself is part of the box, as a degenerate box.
-    boxes.append(Aabb(min_corner=root_location.copy(), max_corner=root_location.copy()))
 
     world_bbox = union_aabbs(boxes)
     assert world_bbox is not None
 
     world_matrix = make_world_matrix(root_location, root_rotation)
-    collection = ensure_collection(bpy.context.scene, collection_name)
+    if collection is None:
+        collection = ensure_collection(bpy.context.scene, collection_name)
 
     # Follows the scene's own naming convention: SPOT class, then label,
     # then classification tags. The `VolumeSpace_` prefix is what
@@ -914,9 +930,45 @@ def build_ifc_bounding_box(
     bbox_object.display_type = "WIRE"
     bbox_object.hide_render = True
     bbox_object.matrix_world = world_matrix
+    if source_name is not None:
+        bbox_object[PROP_IFC_BOUNDING_BOX_SOURCE] = source_name
+    if ifc_file:
+        bbox_object[PROP_IFC_FILE] = Path(ifc_file).name
     collection.objects.link(bbox_object)
 
     return bbox_object
+
+
+def find_ifc_bounding_box(
+    project_collection: bpy.types.Collection,
+) -> bpy.types.Object | None:
+    """The bounding box an earlier run built for `project_collection`, if any."""
+    return next(
+        (
+            obj
+            for obj in bpy.data.objects
+            if obj.get(PROP_IFC_BOUNDING_BOX_SOURCE) == project_collection.name
+        ),
+        None,
+    )
+
+
+def ifc_bounding_box_target_collection(
+    scene: bpy.types.Scene,
+) -> bpy.types.Collection | None:
+    """
+    The AssetSpace collection a new IFC bounding box is sorted into.
+
+    Linking the box there directly saves the manual drag: the scene build
+    reads it as a building-level source volume, and the box's placement in
+    the asset space becomes the translation of the whole IFC model. Returns
+    `None` when the scene has no AssetSpace collection, or more than one, so
+    the caller can fall back to a separate collection.
+    """
+    try:
+        return pick_semantic_asset_collection(scene)
+    except RuntimeError:
+        return None
 
 
 def descendant_role_collections(
@@ -1469,13 +1521,13 @@ def make_container_space_node(
     uri_suffix_registry: set[str],
     bot_uri_suffix_registry: set[str],
     *,
-    default_bot_class: str,
     default_spot_class: str,
     sort_order: int,
 ) -> SpaceNodeSpec | None:
+    # No default BOT class: a direct space is a room only when its name says
+    # so. Plans, documents and pictures land here too.
     semantics = root_semantics(
         root,
-        default_bot_class=default_bot_class,
         default_spot_class=(
             SPOT_CLASS_VOLUME if is_view_like_name(root.name) else default_spot_class
         ),
@@ -1508,7 +1560,7 @@ def make_container_space_node(
     node = SpaceNodeSpec(
         role=ROLE_SPACE,
         spot_class=semantics.spot_class or default_spot_class,
-        bot_class=semantics.bot_class or default_bot_class,
+        bot_class=semantics.bot_class,
         helper_name=helper_name,
         uri_suffix=uri_suffix,
         bot_uri_suffix=bot_uri_suffix,
@@ -1527,7 +1579,11 @@ def make_container_space_node(
         source_collection=root_source_collection_name(root),
         source_ifc_class=semantics.ifc_class,
         source_definition_id=get_ifc_definition_id(source_object),
-        source_asset_path=semantics.asset_path,
+        source_asset_path=(
+            object_ifc_model_asset_path(source_object, semantics)
+            if source_object is not None
+            else semantics.asset_path
+        ),
         plan_kind=semantics.plan_kind,
         source_collections=root_source_collection_names(root),
     )
@@ -1897,7 +1953,6 @@ def build_scene_specs(
             helper_name_registry,
             uri_suffix_registry,
             bot_uri_suffix_registry,
-            default_bot_class=BOT_CLASS_SPACE,
             default_spot_class=SPOT_CLASS_ENTITY,
             sort_order=225,
         )

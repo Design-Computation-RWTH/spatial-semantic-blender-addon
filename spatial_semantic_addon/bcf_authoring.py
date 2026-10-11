@@ -131,6 +131,12 @@ def is_component_object(_owner: object, obj: bpy.types.Object) -> bool:
     return helper is not None and str(helper.get(PROP_BOT_CLASS, "")) == BOT_CLASS_ELEMENT
 
 
+def is_bot_referent_object(_owner: object, obj: bpy.types.Object) -> bool:
+    """An object whose helper stands for a BOT entity a space can represent."""
+    helper = helper_for_reference(obj)
+    return helper is not None and bool(helper.get(PROP_BOT_CLASS))
+
+
 def resolve_picture_owner_and_helper(
     context: bpy.types.Context,
     helper_collection_name: str,

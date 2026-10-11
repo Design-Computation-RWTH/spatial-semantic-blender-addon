@@ -106,6 +106,11 @@ PROP_SOURCE_COLLECTION = "spot_source_collection"
 PROP_SOURCE_IFC_CLASS = "spot_source_ifc_class"
 PROP_SOURCE_DEFINITION_ID = "spot_source_ifc_definition_id"
 PROP_SOURCE_ASSET_PATH = "spot_source_asset_path"
+# Set on an IFC bounding box: the `IfcProject/...` collection it stands for.
+PROP_IFC_BOUNDING_BOX_SOURCE = "spot_ifc_bounding_box_source"
+# Set on an IFC bounding box: the file name of the IFC model in the assets,
+# for example `Domhof 6.ifc`. It wins over the path inferred from the label.
+PROP_IFC_FILE = "spot_ifc_file"
 PROP_PLAN_KIND = "spot_plan_kind"
 PROP_LOCAL_BBOX = "spot_local_bbox"
 PROP_LENGTH_UNIT = "spot_length_unit"
@@ -113,6 +118,11 @@ PROP_SORT_KEY = "spot_sort_key"
 PROP_SOURCE_COLLECTIONS = "spot_source_collections"
 PROP_PROXY_ROLE = "spot_proxy_role"
 PROP_SHARED_ENTITY_KEY = "spot_shared_entity_key"
+# Further BOT referents a space also `spot:represents`, beyond its own: a
+# floor plan that stands for a storey, say. Each entry points at the source
+# object or collection of a helper that carries the BOT class. The list sits
+# on the space's own source, see `represents_link_owner`.
+PROP_REPRESENTS_LINKS = "spot_represents_links"
 PROP_ASSET_AXIS_X_DIRECTION = "spot_asset_axis_x_direction"
 PROP_ASSET_AXIS_Y_DIRECTION = "spot_asset_axis_y_direction"
 PROP_ASSET_AXIS_Z_DIRECTION = "spot_asset_axis_z_direction"
@@ -304,6 +314,10 @@ PROP_AM_AXIS_ACCURACY_BY_AXIS = {
     "X": PROP_AM_AXIS_X_ACCURACY,
     "Y": PROP_AM_AXIS_Y_ACCURACY,
     "Z": PROP_AM_AXIS_Z_ACCURACY,
+}
+
+IFC_TO_BOT_CLASS = {
+    "IfcSpace": BOT_CLASS_SPACE,
 }
 
 IFC_TO_BEO_CLASS = {
@@ -1026,6 +1040,31 @@ def infer_ifc_model_asset_path(base_name: str, ifc_class: str | None) -> str | N
     return f"data/ifc/{file_stem}.ifc"
 
 
+def ifc_model_file_path(file_name: str) -> str:
+    """The source asset path of an IFC model file, from its file name."""
+    return f"data/ifc/{Path(file_name).name}"
+
+
+def object_ifc_model_asset_path(
+    obj: bpy.types.Object,
+    semantics: NameSemantics,
+) -> str | None:
+    """
+    The IFC file a whole-model bounding box stands for.
+
+    The label of a box comes from the `IfcProject` name, which is often an
+    export default such as `Projekt-001` rather than the file name. An
+    explicit `PROP_IFC_FILE` on the box therefore wins over the path inferred
+    from the label.
+    """
+    if not is_ifc_model_class(semantics.ifc_class):
+        return semantics.asset_path
+    file_name = str(obj.get(PROP_IFC_FILE) or "").strip()
+    if file_name:
+        return ifc_model_file_path(file_name)
+    return semantics.asset_path
+
+
 def material_image_source_paths(material: bpy.types.Material) -> list[Path]:
     if not material.use_nodes or material.node_tree is None:
         return []
@@ -1220,6 +1259,16 @@ def infer_semantic_spot_class_and_label(base_name: str) -> tuple[str | None, str
     return None, human
 
 
+def infer_bot_class(ifc_class: str | None) -> str | None:
+    """
+    The BOT class an IFC class states outright. Only `IfcSpace` does: a BOT
+    class is never inferred from where a thing sits in the hierarchy.
+    """
+    if ifc_class is None:
+        return None
+    return IFC_TO_BOT_CLASS.get(ifc_class)
+
+
 def infer_beo_class(ifc_class: str | None) -> str | None:
     if ifc_class is None:
         return None
@@ -1257,7 +1306,11 @@ def parse_name_semantics(
         asset_base_name,
     )
     part_token = normalize_part_token(tags.get(NAME_TAG_PART))
-    bot_class = normalize_bot_class(tags.get(NAME_TAG_BOT)) or default_bot_class
+    bot_class = (
+        normalize_bot_class(tags.get(NAME_TAG_BOT))
+        or infer_bot_class(ifc_class)
+        or default_bot_class
+    )
     spot_class = normalize_spot_class(tags.get(NAME_TAG_SPOT))
     if spot_class is None:
         if plan_kind == PLAN_KIND_FLOORPLAN:
@@ -1285,11 +1338,10 @@ def parse_name_semantics(
         or infer_dot_class(semantic_label)
     )
     if dot_class is not None:
-        # Damage is not part of the building topology. `bot_class` otherwise
-        # falls through to whatever default the caller passed — `Space` for
-        # anything nested inside a storey — and the space would then represent
-        # both a `dot:Damage` and a `bot:Space`, putting the damage into
-        # `bot:hasSpace` as though it were a room inside a room. Where the
+        # Damage is not part of the building topology. An explicit `::BOT=`
+        # tag or a caller's default would otherwise make the space represent
+        # both a `dot:Damage` and a BOT entity, putting the damage into the
+        # BOT hierarchy as though it were a room inside a room. Where the
         # damage sits is already said by its appearance: `spot:appearsIn` the
         # containing Volume Space, refined by SPOT-AM.
         bot_class = None
@@ -1676,6 +1728,31 @@ def find_source_object_for_helper(
     return None
 
 
+def helper_source_collection_root(
+    helper: bpy.types.Object,
+) -> bpy.types.Collection | None:
+    """The collection a helper was built from, when that collection is its root."""
+    source_name = helper.get(PROP_SOURCE_NAME)
+    if not source_name or helper.get(PROP_SOURCE_COLLECTION) != source_name:
+        return None
+    return bpy.data.collections.get(str(source_name))
+
+
+def represents_link_owner(
+    helper: bpy.types.Object,
+) -> bpy.types.Object | bpy.types.Collection:
+    """
+    Where a helper's represents links live: its source object, else the
+    collection it was built from, so the links survive a helper rebuild. A
+    helper with neither, such as an imported one, holds them itself.
+    """
+    return (
+        find_source_object_for_helper(helper)
+        or helper_source_collection_root(helper)
+        or helper
+    )
+
+
 def find_helper_for_source_object(
     source_object: bpy.types.Object,
     helper_collection: bpy.types.Collection | None = None,
@@ -1776,7 +1853,7 @@ def build_container_identifiers(
         return (
             append_name_tags(
                 f"SPOT::Entity::Space::{identifier}-{slug}{helper_part_suffix}",
-                bot_class=bot_class or BOT_CLASS_SPACE,
+                bot_class=bot_class,
                 spot_class=spot_class or SPOT_CLASS_VOLUME,
                 part_token=part_token,
             ),

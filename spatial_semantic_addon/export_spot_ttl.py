@@ -5,7 +5,8 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Callable
+from urllib.parse import quote, urlparse
 
 import bpy
 
@@ -35,6 +36,7 @@ from .spot_blender_common import (
     PROP_LOCAL_BBOX,
     PROP_PLAN_KIND,
     PROP_PROXY_ROLE,
+    PROP_REPRESENTS_LINKS,
     PROP_ROLE,
     PREFIX_IFC_PROJECT,
     PROP_SOURCE_ASSET_PATH,
@@ -62,6 +64,8 @@ from .spot_blender_common import (
     derive_am_region,
     find_helper_for_source_object,
     find_source_object_for_helper,
+    helper_source_collection_root,
+    represents_link_owner,
     format_number,
     helper_am_axis_accuracy,
     helper_am_axis_relation,
@@ -120,6 +124,8 @@ SPACE_AXIS_DEFINITIONS = (
     ("Y", "hasYAxis"),
     ("Z", "hasZAxis"),
 )
+
+IDENTITY_MATRIX_LITERAL = "[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]"
 
 DEFAULT_AXIS_DIRECTIONS = {
     "X": "Front",
@@ -637,10 +643,6 @@ def helper_distribution_id(space_suffix: str) -> str:
     return f"distribution_{space_suffix}"
 
 
-def helper_model_id(space_suffix: str) -> str:
-    return f"model_{space_suffix}"
-
-
 def helper_media_type(helper: bpy.types.Object) -> str | None:
     asset_path = helper_asset_path(helper)
     if not asset_path:
@@ -687,7 +689,9 @@ def asset_url_for_helper(helper: bpy.types.Object, asset_base_url: str) -> str |
     else:
         category = "plans"
     base = asset_base_url.rstrip("/")
-    return f"{base}/{category}/{filename}"
+    # A file name such as `Domhof 6 Export.ifc` is valid on disk, but a space
+    # is not valid in an IRI, so the URL carries the percent-encoded name.
+    return f"{base}/{category}/{quote(filename)}"
 
 
 def perspective_picture_camera(
@@ -906,6 +910,55 @@ def exported_matrix_literal(
     return matrix_to_column_major_literal(matrix, precision)
 
 
+def represents_link_target(
+    entry,
+    exported_helper_names: set[str],
+) -> bpy.types.Object | None:
+    if entry.collection is not None:
+        for helper_name in sorted(exported_helper_names):
+            helper = bpy.data.objects.get(helper_name)
+            if (
+                helper is not None
+                and helper_source_collection_root(helper) == entry.collection
+            ):
+                return helper
+        return None
+    return helper_for_exported_reference(entry.object, exported_helper_names)
+
+
+def represented_link_bot_suffixes(
+    helper: bpy.types.Object,
+    bot_export_suffixes: dict[str, str],
+) -> list[str]:
+    """
+    The BOT referents of other helpers that this space also represents, such
+    as the storey a floor plan stands for.
+    """
+    owner = represents_link_owner(helper)
+    suffixes: list[str] = []
+    for entry in getattr(owner, PROP_REPRESENTS_LINKS, []):
+        reference = entry.collection or entry.object
+        if reference is None:
+            raise RuntimeError(
+                f"'{owner.name}' contains a missing represents link"
+            )
+        target = represents_link_target(entry, set(bot_export_suffixes))
+        if target is None:
+            raise RuntimeError(
+                f"'{owner.name}' represents '{reference.name}', which is not "
+                "part of the exported helper scene"
+            )
+        if not target.get(PROP_BOT_CLASS):
+            raise RuntimeError(
+                f"'{owner.name}' represents '{reference.name}', which has no "
+                "BOT class"
+            )
+        suffix = bot_export_suffixes[target.name]
+        if suffix not in suffixes:
+            suffixes.append(suffix)
+    return suffixes
+
+
 def export_space_block(
     helper: bpy.types.Object,
     export_suffixes: dict[str, str],
@@ -927,10 +980,13 @@ def export_space_block(
     # `dot:Damage`. `parse_name_semantics` already clears `bot_class` for these,
     # so this also covers a helper carrying a stale `::BOT=` tag from an older
     # scene.
+    own_bot_suffix = None
     if helper.get(PROP_BOT_CLASS) and not helper_dot_class(helper):
-        predicates.append(
-            f"spot:represents {LOCAL_TERM_MARKER}{bot_export_suffixes[helper.name]}"
-        )
+        own_bot_suffix = bot_export_suffixes[helper.name]
+        predicates.append(f"spot:represents {LOCAL_TERM_MARKER}{own_bot_suffix}")
+    for link_suffix in represented_link_bot_suffixes(helper, bot_export_suffixes):
+        if link_suffix != own_bot_suffix:
+            predicates.append(f"spot:represents {LOCAL_TERM_MARKER}{link_suffix}")
     if helper_dot_class(helper):
         predicates.append(
             f"spot:represents {LOCAL_TERM_MARKER}{dot_export_suffixes[helper.name]}"
@@ -960,7 +1016,14 @@ def export_distribution_block(
     if asset_url is None:
         return ""
 
-    distribution_id = helper_distribution_id(export_suffixes[helper.name])
+    # A model file is a document like a plan sheet: the file is its own
+    # Document Space, which owns the distribution, while the Volume Space
+    # stays the physical situation and only appears in that document.
+    if is_ifc_model_space(helper):
+        owner_suffix = ifc_model_document_suffix(helper, export_suffixes)
+    else:
+        owner_suffix = export_suffixes[helper.name]
+    distribution_id = helper_distribution_id(owner_suffix)
     media_type = helper_media_type(helper)
     label = helper_display_label(helper)
     distribution_block = turtle_block(
@@ -976,38 +1039,125 @@ def export_distribution_block(
         ],
     )
 
-    if is_ifc_model_space(helper):
-        # A `dcat:Distribution` is a distribution of a `dcat:Dataset`, so the
-        # IFC file hangs off a dataset standing for the model rather than off
-        # the space directly — the same shape a photograph already uses, where
-        # the distribution belongs to the `snapshot_...` dataset. The space
-        # then `spot:represents` that model, like every other Entity Space
-        # represents what it stands for.
-        model_id = helper_model_id(export_suffixes[helper.name])
-        model_block = turtle_block(
-            f"{LOCAL_TERM_MARKER}{model_id}",
-            [
-                "a dcat:Dataset",
-                f"dcterms:title {quote_turtle_string(label)}",
-                f"dcat:distribution {LOCAL_TERM_MARKER}{distribution_id}",
-            ],
-        )
-        return "\n\n".join(
-            [
-                f"{LOCAL_TERM_MARKER}{export_suffixes[helper.name]} "
-                f"spot:represents {LOCAL_TERM_MARKER}{model_id} .",
-                model_block,
-                distribution_block,
-            ]
-        )
-
     return "\n".join(
         [
-            f"{LOCAL_TERM_MARKER}{export_suffixes[helper.name]} "
+            f"{LOCAL_TERM_MARKER}{owner_suffix} "
             f"dcat:distribution {LOCAL_TERM_MARKER}{distribution_id} .",
             "",
             distribution_block,
         ]
+    )
+
+
+def has_model_document(
+    helper: bpy.types.Object,
+    asset_base_url: str,
+    document_backed_helper_names: set[str],
+) -> bool:
+    """Whether a whole-model IFC space is exported with its model file."""
+    return (
+        is_ifc_model_space(helper)
+        and helper.name not in document_backed_helper_names
+        and asset_url_for_helper(helper, asset_base_url) is not None
+    )
+
+
+def ifc_model_document_suffix(
+    helper: bpy.types.Object,
+    export_suffixes: dict[str, str],
+) -> str:
+    """
+    The Document Space standing for the file of a whole-model IFC space.
+
+    It is named after the Volume Space, so `volumespace-domhof` is in the file
+    `documentspace-domhof`. Volume Space suffixes are unique, and so are these.
+    """
+    space_suffix = export_suffixes[helper.name]
+    name = space_suffix.removeprefix("volumespace-")
+    suffix = f"documentspace-{name}"
+    if suffix in export_suffixes.values():
+        raise RuntimeError(
+            f"The model file of '{helper.name}' would be exported as "
+            f"'{suffix}', which another helper already uses"
+        )
+    return suffix
+
+
+def export_ifc_model_document_space_block(
+    helper: bpy.types.Object,
+    export_suffixes: dict[str, str],
+    precision: int,
+    include_bbox: bool,
+    document_backed_helper_names: set[str],
+) -> str:
+    """
+    The Document Space of the model file behind a whole-model IFC space.
+
+    The Volume Space box is stated around the IFC root, in the file's frame
+    and unit, so the same box is the extent of the model in file coordinates.
+    """
+    document_suffix = ifc_model_document_suffix(helper, export_suffixes)
+    length_unit = helper_length_unit(helper, document_backed_helper_names)
+    predicates = [
+        "a spot:DocumentSpace",
+        f"rdfs:label {quote_turtle_string(helper_display_label(helper))}",
+        f"qudt:hasUnit {qudt_unit_term(length_unit)}",
+    ]
+    if include_bbox:
+        exported_bbox = exported_bbox_for_helper(helper, length_unit)
+        if exported_bbox is not None:
+            bbox_literal = stringify_bbox(exported_bbox, precision)
+            predicates.append(
+                f"spot-sg:hasBoundingBox {quote_turtle_string(bbox_literal)}^^spot-sg:boundingBoxArray",
+            )
+    for axis_name, predicate in SPACE_AXIS_DEFINITIONS:
+        predicates.append(
+            f"spot:{predicate} {LOCAL_TERM_MARKER}{axis_uri_suffix(document_suffix, axis_name)}"
+        )
+    # The image frame of a plan sheet (Y pointing down) is not the frame of a
+    # model file, so the axes of a model file carry no direction.
+    axis_blocks = space_axis_blocks(
+        document_suffix,
+        helper_display_label(helper),
+        lambda _axis_name: None,
+    )
+    return "\n\n".join(
+        [
+            turtle_block(f"{LOCAL_TERM_MARKER}{document_suffix}", predicates),
+            axis_blocks,
+        ]
+    )
+
+
+def export_ifc_model_document_appearance_block(
+    helper: bpy.types.Object,
+    export_suffixes: dict[str, str],
+    include_transform: bool,
+) -> str:
+    """
+    The appearance of a whole-model IFC space in its model file.
+
+    The Volume Space origin is the IFC root and its unit is the file's, so
+    the space sits in the file with the identity matrix.
+    """
+    space_suffix = export_suffixes[helper.name]
+    document_suffix = ifc_model_document_suffix(helper, export_suffixes)
+    app_id = f"appearance_{space_suffix}_in_{document_suffix}"
+    predicates = [
+        "a spot:DocumentAppearance",
+        f"spot:appearsIn {LOCAL_TERM_MARKER}{document_suffix}",
+    ]
+    if include_transform:
+        predicates.append(
+            f"gom:hasTransformationMatrix {quote_turtle_string(IDENTITY_MATRIX_LITERAL)}^^gom:columnMajorArray",
+        )
+    return "\n".join(
+        [
+            f"{LOCAL_TERM_MARKER}{space_suffix} "
+            f"spot:hasAppearance {LOCAL_TERM_MARKER}{app_id} .",
+            "",
+            turtle_block(f"{LOCAL_TERM_MARKER}{app_id}", predicates),
+        ],
     )
 
 
@@ -1022,23 +1172,33 @@ def export_space_axis_blocks(
     ):
         return ""
 
-    space_suffix = export_suffixes[helper.name]
-    label = helper_display_label(helper)
-    axis_blocks: list[str] = []
+    # Only Asset and Document Spaces carry a direction definition; the axes
+    # of an AM-enabled space exist to hang boundary points off.
+    if is_asset_space(helper):
+        direction_for = lambda axis_name: helper_asset_axis_direction(helper, axis_name)
+    elif is_document_space(helper):
+        direction_for = default_document_axis_direction
+    else:
+        direction_for = lambda _axis_name: None
+    return space_axis_blocks(
+        export_suffixes[helper.name],
+        helper_display_label(helper),
+        direction_for,
+    )
 
+
+def space_axis_blocks(
+    space_suffix: str,
+    label: str,
+    direction_for: Callable[[str], str | None],
+) -> str:
+    axis_blocks: list[str] = []
     for axis_name, _predicate in SPACE_AXIS_DEFINITIONS:
         predicates = [
             "a spot:Axis",
             f"rdfs:label {quote_turtle_string(f'{axis_name} axis of {label}')}",
         ]
-        # Only Asset and Document Spaces carry a direction definition; the axes
-        # of an AM-enabled space exist to hang boundary points off.
-        if is_asset_space(helper):
-            direction = helper_asset_axis_direction(helper, axis_name)
-        elif is_document_space(helper):
-            direction = default_document_axis_direction(axis_name)
-        else:
-            direction = None
+        direction = direction_for(axis_name)
         if direction:
             predicates.append(f"spot:hasDirection spot:{direction}")
         axis_blocks.append(
@@ -1580,6 +1740,17 @@ def write_turtle(
                 export_suffixes,
                 asset_base_url,
             )
+        if has_model_document(helper, asset_base_url, document_backed_helper_names):
+            lines.append(
+                export_ifc_model_document_space_block(
+                    helper,
+                    export_suffixes,
+                    precision,
+                    include_bbox=include_bbox,
+                    document_backed_helper_names=document_backed_helper_names,
+                )
+            )
+            lines.append("")
         if distribution_block:
             lines.append(distribution_block)
             lines.append("")
@@ -1632,6 +1803,20 @@ def write_turtle(
         if am_mapping_blocks:
             lines.append(am_mapping_blocks)
             lines.append("")
+
+    for helper in exported_helpers:
+        if not has_model_document(
+            helper, asset_base_url, document_backed_helper_names
+        ):
+            continue
+        lines.append(
+            export_ifc_model_document_appearance_block(
+                helper,
+                export_suffixes,
+                include_transform=include_transform,
+            )
+        )
+        lines.append("")
 
     for physical_helper, document_helper in proxy_pairings:
         lines.append(

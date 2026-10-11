@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import traceback
+from pathlib import Path
 
 import bpy
 from bpy.props import (
     BoolProperty,
+    CollectionProperty,
     EnumProperty,
     FloatProperty,
     IntProperty,
@@ -29,6 +31,8 @@ from .bcf_authoring import (
     PROP_BCF_TITLE,
     PROP_OBSERVED_DAMAGES,
     SPOT_PG_object_reference,
+    helper_for_reference,
+    is_bot_referent_object,
     is_component_object,
     is_damage_object,
     normalize_reference_object,
@@ -40,8 +44,10 @@ from .build_spot_scene import (
     build_helper_scene,
     build_ifc_bounding_box,
     descendant_role_collections,
+    find_ifc_bounding_box,
     find_ifc_project_collections,
     ifc_bounding_box_source_objects,
+    ifc_bounding_box_target_collection,
 )
 from .export_spot_ttl import (
     DEFAULT_BASE_IRI,
@@ -72,18 +78,23 @@ from .spot_blender_common import (
     HELPER_COLLECTION_MARKER,
     HELPER_COLLECTION_NAME,
     PROP_AM_ENABLED,
+    PROP_IFC_FILE,
+    PROP_SOURCE_ASSET_PATH,
     PROP_AM_USE_NORMALIZED_COORDINATES,
     PROP_AM_REFERENCE_ASSET,
     PROP_AM_REFERENCE_HELPER,
     PROP_ASSET_AXIS_X_DIRECTION,
     PROP_ASSET_AXIS_Y_DIRECTION,
     PROP_ASSET_AXIS_Z_DIRECTION,
+    PROP_BOT_CLASS,
     PROP_HELPER,
     PROP_LABEL,
     PROP_LOCAL_BBOX,
     PROP_PROXY_ROLE,
+    PROP_REPRESENTS_LINKS,
     PROP_ROLE,
     PROP_SORT_KEY,
+    represents_link_owner,
     PROP_SOURCE_COLLECTION,
     PROP_SPOT_CLASS,
     PROP_URI_SUFFIX,
@@ -108,6 +119,8 @@ from .spot_blender_common import (
     find_helper_for_source_object,
     find_project_collection,
     find_source_object_for_helper,
+    ifc_model_file_path,
+    is_ifc_model_class,
     format_number,
     helper_am_enabled,
     human_name,
@@ -115,6 +128,7 @@ from .spot_blender_common import (
     helper_local_bbox,
     helper_root_objects,
     local_bbox_from_world_bbox,
+    parse_name_semantics,
     overlap_volume,
 )
 
@@ -979,6 +993,12 @@ class SPOT_PG_scene_settings(bpy.types.PropertyGroup):
         type=bpy.types.Object,
         poll=is_component_object,
     )
+    represents_candidate: PointerProperty(
+        name="Represents",
+        description="BOT entity the selected space also represents",
+        type=bpy.types.Object,
+        poll=is_bot_referent_object,
+    )
     bcf_project_guid: StringProperty(
         name="BCF Project GUID",
         default="",
@@ -1083,6 +1103,41 @@ def remove_picture_reference(
     return True, name
 
 
+class SPOT_PG_represents_link(bpy.types.PropertyGroup):
+    """A BOT entity a space also represents, by its source object or collection."""
+
+    object: PointerProperty(type=bpy.types.Object)
+    collection: PointerProperty(type=bpy.types.Collection)
+
+
+def represents_link_name(entry: SPOT_PG_represents_link) -> str | None:
+    target = entry.collection or entry.object
+    return target.name if target is not None else None
+
+
+def resolve_represents_owner(
+    context: bpy.types.Context,
+) -> tuple[
+    bpy.types.Object | bpy.types.Collection | None,
+    bpy.types.Object | None,
+    str | None,
+]:
+    """The selected space's helper and the source that holds its links."""
+    active = context.active_object
+    if active is None:
+        return None, None, "Select a space or its SPOT helper"
+    settings = context.scene.spot_tools_settings
+    collection = bpy.data.collections.get(settings.helper_collection)
+    if collection is None or not collection.get(HELPER_COLLECTION_MARKER):
+        return None, None, (
+            f"SPOT helper collection '{settings.helper_collection}' was not found"
+        )
+    helper = helper_for_reference(active, collection)
+    if helper is None:
+        return None, None, "The selected object has no generated SPOT helper"
+    return represents_link_owner(helper), helper, None
+
+
 def operator_error_message(error: Exception) -> str:
     """
     A message that still says something once Blender shows it in the status bar.
@@ -1175,6 +1230,65 @@ class SPOT_OT_remove_picture_component(bpy.types.Operator):
             self.report({"ERROR"}, message)
             return {"CANCELLED"}
         self.report({"INFO"}, f"Removed component '{message}'")
+        return {"FINISHED"}
+
+
+class SPOT_OT_add_represents_link(bpy.types.Operator):
+    bl_idname = "spot.add_represents_link"
+    bl_label = "Add Represented Entity"
+    bl_description = "Let the selected space also represent the chosen BOT entity"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        settings = context.scene.spot_tools_settings
+        owner, helper, error = resolve_represents_owner(context)
+        if owner is None:
+            self.report({"ERROR"}, error or "No space selected")
+            return {"CANCELLED"}
+        candidate = settings.represents_candidate
+        if candidate is None or not is_bot_referent_object(settings, candidate):
+            self.report({"ERROR"}, "Choose an object whose helper has a BOT class")
+            return {"CANCELLED"}
+        target_helper = helper_for_reference(candidate)
+        if target_helper == helper:
+            self.report({"ERROR"}, "A space cannot link to its own BOT entity")
+            return {"CANCELLED"}
+        # Store the target's source rather than its helper, which a rebuild
+        # replaces.
+        reference = represents_link_owner(target_helper)
+        links = getattr(owner, PROP_REPRESENTS_LINKS)
+        if any(reference in (entry.object, entry.collection) for entry in links):
+            self.report({"ERROR"}, f"'{reference.name}' is already linked")
+            return {"CANCELLED"}
+        entry = links.add()
+        if isinstance(reference, bpy.types.Collection):
+            entry.collection = reference
+        else:
+            entry.object = reference
+        settings.represents_candidate = None
+        self.report({"INFO"}, f"'{owner.name}' now also represents '{reference.name}'")
+        return {"FINISHED"}
+
+
+class SPOT_OT_remove_represents_link(bpy.types.Operator):
+    bl_idname = "spot.remove_represents_link"
+    bl_label = "Remove Represented Entity"
+    bl_options = {"REGISTER", "UNDO"}
+
+    index: IntProperty(default=0, min=0)
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        owner, _helper, error = resolve_represents_owner(context)
+        if owner is None:
+            self.report({"ERROR"}, error or "No space selected")
+            return {"CANCELLED"}
+        links = getattr(owner, PROP_REPRESENTS_LINKS)
+        if self.index >= len(links):
+            self.report({"ERROR"}, "The selected link no longer exists")
+            return {"CANCELLED"}
+        name = represents_link_name(links[self.index]) or "missing link"
+        links.remove(self.index)
+        self.report({"INFO"}, f"Removed '{name}'")
         return {"FINISHED"}
 
 
@@ -1645,20 +1759,81 @@ class SPOT_OT_set_asset_space_origin(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def loaded_ifc_file_name(context: bpy.types.Context) -> str | None:
+    """The file name of the IFC that Bonsai loaded, if Bonsai is present."""
+    bim_properties = getattr(context.scene, "BIMProperties", None)
+    file_path = str(getattr(bim_properties, "ifc_file", "") or "").strip()
+    return Path(file_path).name if file_path else None
+
+
+def active_ifc_bounding_box(context: bpy.types.Context) -> bpy.types.Object | None:
+    """
+    The IFC bounding box the active object stands for: the box itself, or the
+    box behind an active helper.
+    """
+    active_object = context.active_object
+    if active_object is None:
+        return None
+    source_object = find_source_object_for_helper(active_object) or active_object
+    if source_object.get(PROP_HELPER):
+        return None
+    if not is_ifc_model_class(parse_name_semantics(source_object.name).ifc_class):
+        return None
+    return source_object
+
+
+class SPOT_OT_set_ifc_file(ImportHelper, bpy.types.Operator):
+    bl_idname = "spot.set_ifc_file"
+    bl_label = "SPOT: Set IFC File"
+    bl_description = (
+        "Choose the IFC file that the active IFC bounding box stands for. The "
+        "export links this file name below /assets/ifc/"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    filename_ext = ".ifc"
+    filter_glob: StringProperty(default="*.ifc", options={"HIDDEN"})
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return active_ifc_bounding_box(context) is not None
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        bbox_object = active_ifc_bounding_box(context)
+        if bbox_object is None:
+            self.report({"ERROR"}, "Select an IFC bounding box first")
+            return {"CANCELLED"}
+        file_name = Path(self.filepath).name
+        if not file_name:
+            self.report({"ERROR"}, "Choose an IFC file")
+            return {"CANCELLED"}
+        bbox_object[PROP_IFC_FILE] = file_name
+        # Keep a helper that was built already in step, so an export without
+        # a rebuild links the new file too.
+        helper = find_helper_for_source_object(bbox_object)
+        if helper is not None:
+            helper[PROP_SOURCE_ASSET_PATH] = ifc_model_file_path(file_name)
+        self.report({"INFO"}, f"'{bbox_object.name}' now links '{file_name}'")
+        return {"FINISHED"}
+
+
 class SPOT_OT_create_ifc_bounding_box(bpy.types.Operator):
     bl_idname = "spot.create_ifc_bounding_box"
     bl_label = "SPOT: Create IFC Bounding Box"
     bl_description = (
         "Build one EntitySpace bounding box per 'IfcProject/...' collection "
-        "in the scene, spanning its geometry and its IFC root point, so a "
-        "heavy IFC import can be represented by one object you drag into the "
-        "AssetSpace collection instead of re-parenting it"
+        "in the scene, spanning its geometry and its IFC root point, and sort "
+        "it into the AssetSpace collection. Move the selected box into place; "
+        "its placement is exported as the IFC model's translation"
     )
     bl_options = {"REGISTER", "UNDO"}
 
     collection_name: StringProperty(
-        name="Target Collection",
-        description="Collection the generated bounding boxes are linked into",
+        name="Fallback Collection",
+        description=(
+            "Collection the generated bounding boxes are linked into when the "
+            "scene has no single AssetSpace collection"
+        ),
         default="IFC Bounding Boxes",
     )
 
@@ -1673,9 +1848,23 @@ class SPOT_OT_create_ifc_bounding_box(bpy.types.Operator):
             )
             return {"CANCELLED"}
 
-        created: list[str] = []
+        asset_collection = ifc_bounding_box_target_collection(context.scene)
+        # Bonsai holds one loaded file. Its name is the real asset name, which
+        # the `IfcProject` name (often `Projekt-001`) is not. With several
+        # projects it is unclear which one the file belongs to.
+        ifc_file = (
+            loaded_ifc_file_name(context) if len(project_collections) == 1 else None
+        )
+        created: list[bpy.types.Object] = []
+        existing: list[bpy.types.Object] = []
         try:
             for project_collection in project_collections:
+                # A second run must not add a box at the original position
+                # next to one already moved into place: both would export.
+                previous = find_ifc_bounding_box(project_collection)
+                if previous is not None:
+                    existing.append(previous)
+                    continue
                 root_object = collection_object_named_like_collection(
                     project_collection
                 )
@@ -1685,22 +1874,63 @@ class SPOT_OT_create_ifc_bounding_box(bpy.types.Operator):
                 bbox_object = build_ifc_bounding_box(
                     source_objects,
                     root_object=root_object,
-                    label=human_name(project_collection.name),
+                    label=(
+                        Path(ifc_file).stem
+                        if ifc_file
+                        else human_name(project_collection.name)
+                    ),
                     collection_name=self.collection_name,
+                    collection=asset_collection,
+                    source_name=project_collection.name,
+                    ifc_file=ifc_file,
                 )
-                created.append(bbox_object.name)
+                created.append(bbox_object)
         except Exception as error:
             self.report({"ERROR"}, operator_error_message(error))
             return {"CANCELLED"}
 
-        self.report(
-            {"INFO"},
-            (
-                f"Created {len(created)} bounding box(es) in "
-                f"'{self.collection_name}': {', '.join(created)}. "
-                "Drag them into the AssetSpace collection."
-            ),
+        # Select the boxes so they can be moved into place right away. The
+        # view layer has to sync the new objects before they can be selected.
+        context.view_layer.update()
+        selectable = [
+            obj for obj in created + existing if obj.name in context.view_layer.objects
+        ]
+        if selectable:
+            for obj in context.view_layer.objects.selected:
+                obj.select_set(False)
+            for obj in selectable:
+                obj.select_set(True)
+            context.view_layer.objects.active = selectable[0]
+
+        messages: list[str] = []
+        if created:
+            target_name = (
+                asset_collection.name
+                if asset_collection is not None
+                else self.collection_name
+            )
+            messages.append(
+                f"Created {len(created)} bounding box(es) in '{target_name}': "
+                f"{', '.join(obj.name for obj in created)}."
+            )
+            if asset_collection is None:
+                messages.append(
+                    "No single AssetSpace collection was found, so drag them "
+                    "into the AssetSpace collection."
+                )
+        if existing:
+            messages.append(
+                "Kept existing bounding box(es): "
+                f"{', '.join(obj.name for obj in existing)}."
+            )
+        if created and not ifc_file:
+            messages.append(
+                "The IFC file name is unknown: use 'Set IFC File' to choose it."
+            )
+        messages.append(
+            "Move the selected box into place, then rebuild the helper scene."
         )
+        self.report({"INFO"}, " ".join(messages))
         return {"FINISHED"}
 
 
@@ -1841,8 +2071,22 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
             text="Create Bounding Box",
         )
         bbox_box.label(
-            text="Drag the created boxes into the AssetSpace collection.",
+            text="Sorts the boxes into the AssetSpace collection.",
         )
+        bbox_box.label(
+            text="Move a box into place, then rebuild and export.",
+        )
+        ifc_box = active_ifc_bounding_box(context)
+        if ifc_box is not None:
+            bbox_box.label(text=f"Box: {human_name(ifc_box.name)}")
+            if ifc_box.get(PROP_IFC_FILE):
+                bbox_box.prop(ifc_box, f'["{PROP_IFC_FILE}"]', text="IFC File")
+            else:
+                bbox_box.label(
+                    text="IFC file unknown, guessed from the box label",
+                    icon="ERROR",
+                )
+            bbox_box.operator(SPOT_OT_set_ifc_file.bl_idname, text="Set IFC File...")
 
         origin_box = layout.box()
         origin_box.label(text="Asset Space Origin")
@@ -1912,6 +2156,45 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
                 PROP_ASSET_AXIS_Z_DIRECTION,
                 text="Z axis",
             )
+
+        represents_box = layout.box()
+        represents_box.label(text="Also Represents")
+        represents_owner, represents_helper, represents_error = (
+            resolve_represents_owner(context)
+        )
+        if represents_owner is None:
+            represents_box.label(
+                text=represents_error or "No space selected", icon="INFO"
+            )
+        else:
+            represents_box.label(text=f"Source: {represents_owner.name}")
+            own_bot_class = represents_helper.get(PROP_BOT_CLASS)
+            represents_box.label(
+                text=(
+                    f"Own BOT class: bot:{own_bot_class}"
+                    if own_bot_class
+                    else "Own BOT class: none"
+                ),
+            )
+            add_row = represents_box.row(align=True)
+            add_row.prop(settings, "represents_candidate", text="")
+            add_row.operator(
+                SPOT_OT_add_represents_link.bl_idname, text="Add", icon="ADD"
+            )
+            links = getattr(represents_owner, PROP_REPRESENTS_LINKS)
+            if not links:
+                represents_box.label(text="No further BOT entities", icon="INFO")
+            for index, entry in enumerate(links):
+                row = represents_box.row(align=True)
+                name = represents_link_name(entry)
+                row.label(
+                    text=name or "Missing link",
+                    icon="ERROR" if name is None else "NONE",
+                )
+                remove = row.operator(
+                    SPOT_OT_remove_represents_link.bl_idname, text="", icon="X"
+                )
+                remove.index = index
 
         am_box = layout.box()
         am_box.label(text="SPOT-AM Authoring")
@@ -2431,11 +2714,14 @@ class SPOT_AP_addon_preferences(bpy.types.AddonPreferences):
 CLASSES = (
     SPOT_AP_addon_preferences,
     SPOT_PG_object_reference,
+    SPOT_PG_represents_link,
     SPOT_PG_scene_settings,
     SPOT_OT_add_picture_damage,
     SPOT_OT_remove_picture_damage,
     SPOT_OT_add_picture_component,
     SPOT_OT_remove_picture_component,
+    SPOT_OT_add_represents_link,
+    SPOT_OT_remove_represents_link,
     SPOT_OT_build_helper_scene,
     SPOT_OT_import_turtle_as,
     SPOT_OT_import_dataset_folder,
@@ -2444,6 +2730,7 @@ CLASSES = (
     SPOT_OT_export_dataset_snapshot,
     SPOT_OT_export_topology_turtle_default,
     SPOT_OT_export_topology_turtle_as,
+    SPOT_OT_set_ifc_file,
     SPOT_OT_create_ifc_bounding_box,
     SPOT_OT_project_asset_space_origin,
     SPOT_OT_set_asset_space_origin,
@@ -2473,6 +2760,18 @@ def register() -> None:
     for cls in CLASSES:
         register_class_safe(cls)
     register_object_properties()
+    for owner_type in (bpy.types.Object, bpy.types.Collection):
+        if hasattr(owner_type, PROP_REPRESENTS_LINKS):
+            delattr(owner_type, PROP_REPRESENTS_LINKS)
+        setattr(
+            owner_type,
+            PROP_REPRESENTS_LINKS,
+            CollectionProperty(
+                name="Also represents",
+                description="Further BOT entities this space represents, such as the storey a floor plan stands for",
+                type=SPOT_PG_represents_link,
+            ),
+        )
     for owner_type in (bpy.types.Object, bpy.types.Collection):
         if hasattr(owner_type, PROP_SIMULATE_PLACEMENT_CHANGE):
             delattr(owner_type, PROP_SIMULATE_PLACEMENT_CHANGE)
@@ -2636,8 +2935,9 @@ def register() -> None:
 def unregister() -> None:
     unregister_object_properties()
     for owner_type in (bpy.types.Object, bpy.types.Collection):
-        if hasattr(owner_type, PROP_SIMULATE_PLACEMENT_CHANGE):
-            delattr(owner_type, PROP_SIMULATE_PLACEMENT_CHANGE)
+        for prop_name in (PROP_SIMULATE_PLACEMENT_CHANGE, PROP_REPRESENTS_LINKS):
+            if hasattr(owner_type, prop_name):
+                delattr(owner_type, prop_name)
     if hasattr(bpy.types.Scene, "spot_tools_settings"):
         del bpy.types.Scene.spot_tools_settings
     for prop_name in (

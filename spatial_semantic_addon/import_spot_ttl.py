@@ -25,6 +25,8 @@ from .spot_blender_common import (
     LENGTH_UNIT_METER,
     LENGTH_UNIT_PIXEL,
     PROP_HELPER,
+    PROP_REPRESENTS_LINKS,
+    PROP_URI_SUFFIX,
     ROLE_BUILDING,
     ROLE_ELEMENT,
     ROLE_MODEL,
@@ -48,6 +50,10 @@ SPOT_ENTITY_APPEARANCE = "spot:EntityAppearance"
 SPOT_DOCUMENT_APPEARANCE = "spot:DocumentAppearance"
 
 SPOT_CLASS_DOCUMENT_SPACE = "DocumentSpace"
+# Plans and sections never stand in the BOT hierarchy themselves: when one of
+# them represents a BOT referent that another space also represents, the other
+# space owns it and the plan only links to it.
+LINKING_SPOT_CLASSES = {"HorizontalAreaSpace", "VerticalAreaSpace"}
 
 KNOWN_PREFIXES = {
     "beo": "https://pi.pauwel.be/voc/buildingelement#",
@@ -94,6 +100,10 @@ class ImportedSpace:
     length_unit: str = LENGTH_UNIT_METER
     bot_iri: str | None = None
     bot_local_name: str | None = None
+    represented_iris: list[str] = field(default_factory=list)
+    # Local names of the spaces owning the further BOT referents this space
+    # represents (see PROP_REPRESENTS_LINKS).
+    link_target_names: list[str] = field(default_factory=list)
     bot_class: str | None = None
     beo_class: str | None = None
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
@@ -645,7 +655,13 @@ def parse_scene_graph_turtle(
                 rdf_types.extend(split_turtle_object_list(chunk[2:].strip()))
                 continue
             predicate, object_value = chunk.split(" ", 1)
-            predicates[predicate.strip()] = object_value.strip()
+            predicate = predicate.strip()
+            # A repeated predicate adds objects rather than replacing them,
+            # as `p a ; p b` means the same as `p a, b`.
+            if predicate in predicates:
+                predicates[predicate] += f", {object_value.strip()}"
+            else:
+                predicates[predicate] = object_value.strip()
 
         linked_appearances = split_turtle_object_list(
             predicates.get("spot:hasAppearance", "")
@@ -794,11 +810,8 @@ def parse_scene_graph_turtle(
                     if "qudt:hasUnit" in predicates
                     else LENGTH_UNIT_METER
                 ),
-                bot_iri=predicates.get("spot:represents"),
-                bot_local_name=(
-                    parse_prefixed_local_name(predicates["spot:represents"])
-                    if "spot:represents" in predicates
-                    else None
+                represented_iris=split_turtle_object_list(
+                    predicates.get("spot:represents", "")
                 ),
             )
             for axis_name, axis_predicate in (
@@ -952,11 +965,95 @@ def parse_scene_graph_turtle(
 
     for space in spaces.values():
         space.children.sort(key=lambda child_id: spaces[child_id].order)
-        if space.bot_iri is not None:
-            space.bot_class = bot_types.get(space.bot_iri)
-            space.beo_class = beo_types.get(space.bot_iri)
+    assign_represented_referents(spaces, bot_types, beo_types)
 
     return spaces, sorted(root_ids, key=lambda space_id: spaces[space_id].order)
+
+
+def assign_represented_referents(
+    spaces: dict[str, ImportedSpace],
+    bot_types: dict[str, str],
+    beo_types: dict[str, str],
+) -> None:
+    """
+    Split each space's `spot:represents` values into the one BOT referent it
+    owns and the further ones it only links to, such as the storey a floor
+    plan stands for. A referent represented by a plan and by any other space
+    belongs to the other space; otherwise every representing space owns it,
+    as shared document and physical proxies do.
+    """
+    ordered = sorted(spaces.values(), key=lambda value: value.order)
+    representers: dict[str, list[ImportedSpace]] = {}
+    for space in ordered:
+        for iri in space.represented_iris:
+            if iri in bot_types or iri in beo_types:
+                representers.setdefault(iri, []).append(space)
+
+    owners_by_iri: dict[str, list[ImportedSpace]] = {}
+    for iri, candidates in representers.items():
+        standing = [
+            space
+            for space in candidates
+            if space.spot_class not in LINKING_SPOT_CLASSES
+        ]
+        owners_by_iri[iri] = standing or candidates
+
+    for space in ordered:
+        for iri in space.represented_iris:
+            owners = owners_by_iri.get(iri)
+            if owners is None:
+                continue
+            if space in owners and space.bot_iri is None:
+                space.bot_iri = iri
+                space.bot_class = bot_types.get(iri)
+                space.beo_class = beo_types.get(iri)
+            elif space.bot_iri != iri:
+                target = next((owner for owner in owners if owner is not space), None)
+                if target is not None:
+                    space.link_target_names.append(target.local_name)
+        # A space representing no BOT referent keeps its first referent, a
+        # `dot:Damage` say, as the stem of its BOT URI suffix, as before.
+        if space.bot_iri is None and space.represented_iris:
+            space.bot_iri = space.represented_iris[0]
+        if space.bot_iri is not None:
+            space.bot_local_name = parse_prefixed_local_name(space.bot_iri)
+
+
+def apply_represents_links(
+    spaces: dict[str, ImportedSpace],
+    helper_collection: bpy.types.Collection,
+    warnings: list[str],
+) -> None:
+    linking = [space for space in spaces.values() if space.link_target_names]
+    if not linking:
+        return
+    if not hasattr(bpy.types.Object, PROP_REPRESENTS_LINKS):
+        warnings.append(
+            f"{len(linking)} space(s) represent further BOT referents, but the "
+            "add-on is not registered, so these links were not imported"
+        )
+        return
+    helpers_by_suffix = {
+        str(obj.get(PROP_URI_SUFFIX)): obj
+        for obj in helper_collection.objects
+        if obj.get(PROP_HELPER)
+    }
+    for space in sorted(linking, key=lambda value: value.order):
+        helper = helpers_by_suffix.get(space.local_name)
+        if helper is None:
+            continue
+        links = getattr(helper, PROP_REPRESENTS_LINKS)
+        for target_name in space.link_target_names:
+            target = helpers_by_suffix.get(target_name)
+            if target is None:
+                warnings.append(
+                    f"Space '{space.local_name}' represents the referent of "
+                    f"'{target_name}', which was not imported"
+                )
+                continue
+            if any(entry.object == target for entry in links):
+                continue
+            links.add().object = target
 
 
 def build_imported_scene_spec(
@@ -995,7 +1092,8 @@ def build_imported_scene_spec(
                 ROLE_SITE: BOT_CLASS_SITE,
                 ROLE_BUILDING: BOT_CLASS_BUILDING,
                 ROLE_STOREY: BOT_CLASS_STOREY,
-                ROLE_SPACE: BOT_CLASS_SPACE,
+                # No `bot:Space` by position: a space is a room only when the
+                # graph says so.
                 ROLE_ELEMENT: BOT_CLASS_ELEMENT,
             }.get(role)
         node = SpaceNodeSpec(
@@ -1049,6 +1147,7 @@ def import_scene_graph_turtle(
     helper_collection = reset_helper_collection(scene, helper_collection_name)
     for root_spec in root_specs:
         instantiate_helpers(helper_collection, root_spec)
+    apply_represents_links(spaces, helper_collection, warnings)
     bpy.context.view_layer.update()
 
     helper_count = len(

@@ -297,6 +297,43 @@ def root_world_bbox(root: bpy.types.Collection | bpy.types.Object) -> Aabb | Non
     return collection_geometry_bbox(root)
 
 
+def frame_without_scale(matrix: Matrix) -> Matrix:
+    """A source object's location and rotation, without its scale.
+
+    A helper's box is written out in metres as it stands. A scaled source, say
+    a default cube stretched to a bridge's length, would otherwise hand its
+    scale to the helper, which keeps a 2 m box inside a stretched frame: the
+    export then states a 2 m bridge, and every child inherits the stretch.
+    """
+    location, rotation, _scale = matrix.decompose()
+    return make_world_matrix(location, rotation)
+
+
+def scaled_local_bbox(local_bbox: list[float], matrix: Matrix) -> list[float]:
+    """Carry a source object's scale from its frame into its local box."""
+    scale = matrix.to_scale()
+    corners = [
+        [local_bbox[index] * scale[index], local_bbox[index + 3] * scale[index]]
+        for index in range(3)
+    ]
+    return [min(pair) for pair in corners] + [max(pair) for pair in corners]
+
+
+def unscaled_source_frame(
+    obj: bpy.types.Object,
+    local_bbox: list[float],
+    semantics: NameSemantics,
+) -> tuple[Matrix, list[float]]:
+    """The helper frame and box a source object with a local box adopts."""
+    helper_bbox, local_center = source_local_frame(
+        scaled_local_bbox(local_bbox, obj.matrix_world), semantics
+    )
+    world_matrix = frame_without_scale(obj.matrix_world) @ Matrix.Translation(
+        local_center
+    )
+    return world_matrix, helper_bbox
+
+
 def root_helper_pose(
     root: bpy.types.Collection | bpy.types.Object,
     world_bbox: Aabb,
@@ -311,12 +348,8 @@ def root_helper_pose(
                 root.name,
                 default_spot_class=SPOT_CLASS_VOLUME,
             )
-            helper_bbox, local_center = source_local_frame(
-                source_local_bbox, root_semantics
-            )
-            world_matrix = root.matrix_world @ Matrix.Translation(local_center)
-            return world_matrix, helper_bbox
-        world_matrix = root.matrix_world.copy()
+            return unscaled_source_frame(root, source_local_bbox, root_semantics)
+        world_matrix = frame_without_scale(root.matrix_world)
         return world_matrix, local_bbox_from_world_bbox(world_bbox, world_matrix)
 
     world_matrix = make_world_matrix(world_bbox.center)
@@ -1125,14 +1158,22 @@ def resolve_scene_structure(
     if asset_root_object is None:
         asset_root_object = find_asset_root_object(building_collection)
 
+    # An AssetSpace without storeys or spaces is still a valid scene: its
+    # elements, and any IFC bounding box, hang directly off the asset root.
     if (
         not storey_collections
         and not direct_space_collections
         and not storey_objects
         and not direct_space_objects
+        and asset_root_object is None
+        and not any(
+            should_include_object(obj, visible_only=False)
+            for obj in building_collection.all_objects
+        )
     ):
         raise RuntimeError(
-            f"No semantic storey or direct space collections were found under '{building_collection.name}'"
+            f"The AssetSpace '{building_collection.name}' contains nothing to build "
+            "helpers from"
         )
 
     return SceneStructure(
@@ -1173,7 +1214,7 @@ def collect_candidate_elements(
                     source_object=obj,
                     world_bbox=world_bbox,
                     local_bbox=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                    helper_world_matrix=obj.matrix_world.copy(),
+                    helper_world_matrix=frame_without_scale(obj.matrix_world),
                     source_collections=sorted(
                         collection.name for collection in obj.users_collection
                     ),
@@ -1198,7 +1239,7 @@ def collect_candidate_elements(
                     source_object=obj,
                     world_bbox=world_bbox,
                     local_bbox=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                    helper_world_matrix=obj.matrix_world.copy(),
+                    helper_world_matrix=frame_without_scale(obj.matrix_world),
                     source_collections=sorted(
                         collection.name for collection in obj.users_collection
                     ),
@@ -1218,13 +1259,15 @@ def collect_candidate_elements(
             obj.name,
             default_spot_class=SPOT_CLASS_VOLUME,
         )
-        helper_bbox, local_center = source_local_frame(local_bbox, semantics)
+        helper_world_matrix, helper_bbox = unscaled_source_frame(
+            obj, local_bbox, semantics
+        )
         elements.append(
             ElementSource(
                 source_object=obj,
                 world_bbox=world_bbox,
                 local_bbox=helper_bbox,
-                helper_world_matrix=obj.matrix_world @ Matrix.Translation(local_center),
+                helper_world_matrix=helper_world_matrix,
                 source_collections=sorted(
                     collection.name for collection in obj.users_collection
                 ),
@@ -1797,9 +1840,6 @@ def build_scene_specs(
             extent_bbox = union_aabbs([extent_bbox, root_bbox_value])
         storey_entries.append((storey_root, assigned_nodes, world_bbox, extent_bbox))
 
-    if not storey_entries:
-        raise RuntimeError("No storeys with geometric elements were found")
-
     storey_entries.sort(
         key=lambda entry: (entry[2].center.z, entry[0].name),
     )
@@ -1814,17 +1854,25 @@ def build_scene_specs(
         direct_bbox = root_world_bbox(root)
         if direct_bbox is not None:
             building_box_parts.append(direct_bbox)
+    building_root: bpy.types.Collection | bpy.types.Object = (
+        asset_root_object if asset_root_object is not None else building_collection
+    )
     building_bbox = union_aabbs(building_box_parts)
     if building_bbox is None:
         building_bbox = union_aabbs([entry[2] for entry in storey_entries])
+    # An AssetSpace without storeys takes its extent from its own root object,
+    # or else from the elements placed directly in it.
+    if building_bbox is None:
+        building_bbox = root_world_bbox(building_root)
+    if building_bbox is None:
+        building_bbox = preferred_extent_bbox(
+            [*building_direct_spaces, *building_direct],
+            allow_fallback_to_all=True,
+        )
     if building_bbox is None:
         raise RuntimeError(
             "Could not build a building bounding box from the resolved geometry"
         )
-
-    building_root: bpy.types.Collection | bpy.types.Object = (
-        asset_root_object if asset_root_object is not None else building_collection
-    )
     building_source = root_source_object(building_root)
     building_semantics = root_semantics(
         building_root,

@@ -1088,6 +1088,50 @@ def test_loaded_ifc_file_name_reads_bonsai() -> None:
     print("Loaded IFC file name test passed")
 
 
+def test_asset_space_without_storeys_builds() -> None:
+    """An AssetSpace that holds only its root object and one element.
+
+    A bridge has no storeys. The AssetSpace helper takes its extent from the
+    root object, a scaled cube, and the element hangs directly off it.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+    asset = bpy.data.collections.new("AssetSpace")
+    bpy.context.scene.collection.children.link(asset)
+    # A default cube stretched to the asset's size, as one is drawn by hand.
+    root = box_object("AssetSpace_NBW", asset, (5.0, 2.0, 1.5), size=2.0)
+    root.scale = (5.0, 2.0, 1.5)
+    bpy.context.view_layer.update()
+    cube = box_object("Cube", asset, (1.5, 1.5, 1.5))
+
+    result = build_helper_scene(visible_only=False)
+
+    helpers = [obj for obj in bpy.data.objects if obj.get(PROP_HELPER)]
+    asset_helper = next(
+        helper for helper in helpers if helper[PROP_SPOT_CLASS] == "AssetSpace"
+    )
+    cube_helper = next(helper for helper in helpers if helper is not asset_helper)
+    assert result["resolved_storey_count"] == 0
+    assert len(helpers) == 2
+    assert cube_helper.parent == asset_helper
+    assert world_bbox_of_object(asset_helper) == ([0.0, 0.0, 0.0], [10.0, 4.0, 3.0])
+    # The scale lands in the box, not the frame, so the box is in metres.
+    assert tuple(round(v, 6) for v in asset_helper.matrix_world.to_scale()) == (
+        1.0,
+        1.0,
+        1.0,
+    )
+    assert [round(v, 6) for v in asset_helper[PROP_LOCAL_BBOX]] == [
+        -5.0,
+        -2.0,
+        -1.5,
+        5.0,
+        2.0,
+        1.5,
+    ]
+    print("AssetSpace without storeys test passed")
+
+
 if __name__ == "__main__":
     test_document_proxy_uses_the_same_local_frame_as_other_helpers()
     test_document_proxy_origin_already_centred_is_kept()
@@ -1113,3 +1157,4 @@ if __name__ == "__main__":
     test_ifc_file_name_drives_the_exported_distribution()
     test_set_ifc_file_updates_the_box_and_its_helper()
     test_loaded_ifc_file_name_reads_bonsai()
+    test_asset_space_without_storeys_builds()

@@ -149,8 +149,8 @@ class ImportedSpace:
     proxy_of: str | None = None
     # Whether the input gave the unit with qudt:hasUnit.
     unit_stated: bool = True
-    # The SPOT-AM placement of the space on a sheet, as the input states it
-    # (see `stated_am`), when no matrix places it there.
+    # The SPOT-AM placement of the space, as the input states it (see
+    # `stated_am`), when no matrix places it.
     stated_am: dict | None = None
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
     parent_iri: str | None = None
@@ -1414,10 +1414,10 @@ def describe_stated_am(
     am: SpotAmStatements,
 ) -> None:
     """
-    Keep the SPOT-AM description of each placement on a sheet.
+    Keep the SPOT-AM description of each placement SPOT-AM alone states.
 
-    Only a placement SPOT-AM alone states is kept: a matrix states it more
-    precisely and is written as before. See `stated_am` for the format.
+    A placement with a matrix states it more precisely and is written as
+    before. See `stated_am` for the format.
     """
     axis_names = {
         axis_iri: axis_name
@@ -1426,12 +1426,7 @@ def describe_stated_am(
     }
     for space in spaces.values():
         appearance_id = space.chosen_appearance
-        parent = spaces.get(space.parent_iri) if space.parent_iri else None
-        if (
-            appearance_id is None
-            or parent is None
-            or parent.spot_class != SPOT_CLASS_DOCUMENT_SPACE
-        ):
+        if appearance_id is None or space.parent_iri is None:
             continue
         matrix = appearance_matrices.get(appearance_id)
         if matrix is not None and matrix != Matrix.Identity(4):
@@ -1448,7 +1443,7 @@ def describe_stated_am(
                     "source": axis_names[source_axis],
                     "target": axis_names[target_axis],
                     "relation": "Antiparallel" if antiparallel else "Codirectional",
-                    "accuracy": am.accuracies.get(mapping_id, "Exact"),
+                    "accuracy": am.accuracies.get(mapping_id),
                 }
             )
         points = []
@@ -1465,7 +1460,7 @@ def describe_stated_am(
                     "kind": am.boundary_point_kinds.get(mapping.source_point_iri),
                     "relation": mapping.relation_name,
                     "target": spaces[mapping.target_iri].local_name,
-                    "accuracy": am.accuracies.get(mapping_id, "Exact"),
+                    "accuracy": am.accuracies.get(mapping_id),
                 }
             )
         if axes or points:

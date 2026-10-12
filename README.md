@@ -270,7 +270,7 @@ What is laid out on a sheet comes with it:
 - A space that is only on a sheet becomes a child of the sheet. If the graph gives no unit, the space is measured like the sheet.
 - A space that is in the building and on a sheet becomes a pair, as the scene builder makes for a plan. The physical helper stays in the building. A document proxy, named `<space>_on_<sheet>`, lays it out on the sheet. The export writes a `spot:DocumentAppearance` of the space in the sheet from the proxy, next to its building appearance. A space laid out on more than one sheet keeps only the first, and the importer warns about it.
 - A sheet placement with SPOT-AM relations gets the region the relations give on the sheet, as in the building. The importer resolves the relations in page coordinates, with Y down the page, and draws the result with the top edge of the page at y = 0.
-- If SPOT-AM alone places a space on a sheet, with no matrix, the export writes that SPOT-AM description again and no matrix. The description keeps the axis mappings, the `reloc:` relations, their targets, and their accuracies as the input states them. The space gets its axes and boundary points. The region drawn in Blender does not change the export: if you move such a helper, the export still writes the stated SPOT-AM.
+- If SPOT-AM alone places a space on a sheet, with no matrix, the export writes that SPOT-AM description again, and no matrix. See the SPOT-AM rules below.
 
 #### Import into an existing AssetSpace
 
@@ -293,6 +293,13 @@ The importer resolves SPOT-AM relations with these rules:
 - Siblings that meet share a face. When the relations do not fix a face, the importer puts it at equal distances between the fixed faces on each side. For example, four spans chained from the front of a bridge to its rear split its length into four equal parts.
 - A space that appears more than once in the same kind of space gets only its first appearance. The importer writes a warning.
 
+If SPOT-AM alone places a space, with no matrix, the export writes that SPOT-AM description again, and no matrix. This applies in the building and on a sheet. A reader derives the region from the relations, as the importer does:
+
+- The description keeps the axis mappings, the `reloc:` relations, their targets, and their accuracies as the input states them. An accuracy that the input does not state stays out.
+- The space keeps the bounding box that the input gives it, written as the input wrote it. If the input gives no box, the export writes none. The region that the importer derived is not exported.
+- The space gets its axes and boundary points.
+- If you move such a helper, the export still writes the stated SPOT-AM. To state a new placement, commit it as SPOT-SG.
+
 #### Move spaces from SPOT-AM to SPOT-SG
 
 SPOT-AM locates a space qualitatively. Its derived region can be wrong without the data being wrong: the spans of a bridge split evenly when nothing says where the faces between them lie. You can place such spaces exactly in Blender and record that refinement as provenance.
@@ -314,7 +321,7 @@ The output is a snapshot in `<datasets>/exports/<project>/<timestamp>/`, like a 
 
 `Import Dataset Folder` replays the log, so it shows the current state: committed spaces at their SPOT-SG placement, and the rest resolved by SPOT-AM around them.
 
-A plain `Export TTL` writes every helper with a matrix and box. It warns when spaces are still placed by imported SPOT-AM relations, because their derived regions would then appear as exact SPOT-SG placements.
+A plain `Export TTL` writes a placement that SPOT-AM alone states as stated, see the SPOT-AM rules above. It does not write the commits.
 
 ### IFC Bounding Box
 

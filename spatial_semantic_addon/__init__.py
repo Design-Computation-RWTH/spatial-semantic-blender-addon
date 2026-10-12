@@ -1202,27 +1202,6 @@ def import_anchor_from_context(
     return True, anchor
 
 
-def report_spot_am_flattened(
-    operator: bpy.types.Operator,
-    context: bpy.types.Context,
-) -> None:
-    """Warn that an export stated imported SPOT-AM regions as SPOT-SG."""
-    count = sum(
-        1
-        for obj in context.scene.objects
-        if obj.get(PROP_HELPER) and is_placed_by_spot_am(obj)
-    )
-    if count:
-        operator.report(
-            {"WARNING"},
-            (
-                f"{count} spaces are still placed by imported SPOT-AM relations; this "
-                "export states their derived regions as SPOT-SG. Use Export "
-                "Transition Dataset to keep SPOT-AM and record what was refined"
-            ),
-        )
-
-
 def operator_error_message(error: Exception) -> str:
     """
     A message that still says something once Blender shows it in the status bar.
@@ -1692,7 +1671,6 @@ class SPOT_OT_export_turtle_default(bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported scene graph Turtle to {result['output_path']}")
-        report_spot_am_flattened(self, context)
         return {"FINISHED"}
 
 
@@ -1751,7 +1729,6 @@ class SPOT_OT_export_turtle_as(ExportHelper, bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported scene graph Turtle to {result['output_path']}")
-        report_spot_am_flattened(self, context)
         return {"FINISHED"}
 
 

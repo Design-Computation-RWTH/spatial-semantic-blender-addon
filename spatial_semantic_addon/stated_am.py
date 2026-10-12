@@ -1,8 +1,8 @@
 """
 SPOT-AM placements an imported graph states, kept to be written again.
 
-An imported space laid out on a sheet is often located only with SPOT-AM:
-axis mappings and `reloc:` relations of its boundary points, with no matrix.
+An imported space is often located only with SPOT-AM: axis mappings and
+`reloc:` relations of its boundary points, with no matrix.
 The importer derives a region from them to draw the space, but a matrix
 taken from that region would claim a precision the input never had. The
 importer therefore keeps the description itself on the helper that carries
@@ -15,7 +15,8 @@ The description is JSON:
      "points": [{"axis": "X", "kind": "Max", "relation": "containedInRight",
                  "target": "6292_202e", "accuracy": "Approximate"}]}
 
-`kind` is "Min", "Max" or null for a plain spot-am:BoundaryPoint. A target is
+`kind` is "Min", "Max" or null for a plain spot-am:BoundaryPoint, and an
+accuracy is null when the input states none. A target is
 the local name of the space related to, which the export resolves to the
 helper that space was imported as.
 """
@@ -43,6 +44,10 @@ def point_id(source_suffix: str, axis: str, kind: str | None) -> str:
 
 def axis_id(space_suffix: str, axis: str) -> str:
     return f"{space_suffix}_{axis.lower()}_axis"
+
+
+def accuracy_predicate(accuracy: str | None) -> list[str]:
+    return [f"spot-am:hasAccuracy spot-am:{accuracy}"] if accuracy else []
 
 
 def mapping_ids(app_id: str, description: dict) -> tuple[list[str], list[str]]:
@@ -102,7 +107,7 @@ def mapping_blocks(
                 f"{marker}{mapping_id}",
                 [
                     "a spot-am:AxisMapping",
-                    f"spot-am:hasAccuracy spot-am:{axis['accuracy']}",
+                    *accuracy_predicate(axis["accuracy"]),
                     f"spot-am:hasAxisRelationType spot-am:{axis['relation']}",
                     f"spot-am:hasSourceAxis {marker}{axis_id(source_suffix, axis['source'])}",
                     f"spot-am:hasTargetAxis {marker}{axis_id(target_suffix, axis['target'])}",
@@ -119,7 +124,7 @@ def mapping_blocks(
                 [
                     "a spot-am:BoundaryPointMapping",
                     f"reloc:{point['relation']} {marker}{suffix_for_target(point['target'])}",
-                    f"spot-am:hasAccuracy spot-am:{point['accuracy']}",
+                    *accuracy_predicate(point["accuracy"]),
                     f"spot-am:hasSourcePoint {marker}{source_point}",
                 ],
             )

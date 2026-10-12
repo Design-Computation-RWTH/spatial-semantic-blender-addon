@@ -10,6 +10,7 @@ from urllib.parse import quote, urlparse
 
 import bpy
 
+from .spot_transition import PROP_IMPORT_BBOX, PROP_IMPORT_IRI, local_name_of
 from .stated_am import (
     appearance_predicates as stated_am_predicates,
     mapping_blocks as stated_am_blocks,
@@ -1021,7 +1022,14 @@ def export_space_block(
         predicates.append(
             f"spot:represents {LOCAL_TERM_MARKER}{dot_export_suffixes[helper.name]}"
         )
-    if include_bbox and not helper_am_enabled(helper):
+    if include_bbox and stated_am(helper) is not None:
+        # A placement SPOT-AM states keeps the box the input gave, if any, as
+        # written: the region the importer derived states nothing, and a
+        # commit's log retracts exactly that box.
+        imported_bbox = helper.get(PROP_IMPORT_BBOX)
+        if imported_bbox:
+            predicates.append(f"spot-sg:hasBoundingBox {imported_bbox}")
+    elif include_bbox and not helper_am_enabled(helper):
         exported_bbox = exported_bbox_for_helper(helper, length_unit)
         if exported_bbox is not None:
             bbox_literal = stringify_bbox(exported_bbox, precision)
@@ -1492,14 +1500,19 @@ def stated_am_sources(
 
 
 def stated_am_target_suffix(local_name: str, export_suffixes: dict[str, str]) -> str:
-    """The exported space an imported SPOT-AM relation points at."""
+    """
+    The exported space an imported SPOT-AM relation points at: the helper
+    the space was imported as, or the AssetSpace an import was placed in,
+    which stands for the imported root.
+    """
     for helper_name, suffix in export_suffixes.items():
         helper = bpy.data.objects.get(helper_name)
-        if (
-            helper is not None
-            and str(helper.get(PROP_URI_SUFFIX, "")) == local_name
-            and not is_document_proxy(helper)
-        ):
+        if helper is None or is_document_proxy(helper):
+            continue
+        if str(helper.get(PROP_URI_SUFFIX, "")) == local_name:
+            return suffix
+        imported = helper.get(PROP_IMPORT_IRI)
+        if imported and local_name_of(str(imported)) == local_name:
             return suffix
     raise RuntimeError(
         f"A stated SPOT-AM relation points at '{local_name}', which is not "

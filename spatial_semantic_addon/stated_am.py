@@ -10,7 +10,7 @@ the placement, and the export writes it again in place of a matrix.
 
 The description is JSON:
 
-    {"axes": [{"source": "X", "target": "X",
+    {"axes": [{"source": "X", "target": "X", "target_direction": "Rear",
                "relation": "Codirectional", "accuracy": "Exact"}],
      "points": [{"axis": "X", "kind": "Max", "relation": "containedInRight",
                  "target": "6292_202e", "accuracy": "Approximate"}]}
@@ -18,7 +18,10 @@ The description is JSON:
 `kind` is "Min", "Max" or null for a plain spot-am:BoundaryPoint, and an
 accuracy is null when the input states none. A target is
 the local name of the space related to, which the export resolves to the
-helper that space was imported as.
+helper that space was imported as. `target_direction` is the direction the
+input gives the target axis, or null: the export maps it to the axis that
+points that way in the space the export places the source in, so an
+AssetSpace an import was placed in may name its axes otherwise.
 """
 
 from __future__ import annotations
@@ -91,26 +94,32 @@ def mapping_blocks(
     suffix_for_target: Callable[[str], str],
     marker: str,
     turtle_block: Callable[[str, list[str]], str],
+    target_axis_for: Callable[[dict], tuple[str, bool]] = lambda axis: (axis["target"], False),
 ) -> str:
     """
     The mappings and the source's boundary points.
 
     `target_suffix` is the space the appearance places the source in, whose
-    axes the axis mappings point at; `suffix_for_target` resolves the space
-    a boundary point is related to.
+    axes the axis mappings point at; `target_axis_for` gives the axis an
+    axis mapping points at there, and whether it points the other way.
+    `suffix_for_target` resolves the space a boundary point is related to.
     """
     axis_mapping_ids, point_mapping_ids = mapping_ids(app_id, description)
     blocks: list[str] = []
     for mapping_id, axis in zip(axis_mapping_ids, description["axes"]):
+        target_axis, reversed_axis = target_axis_for(axis)
+        relation = axis["relation"]
+        if reversed_axis:
+            relation = "Codirectional" if relation == "Antiparallel" else "Antiparallel"
         blocks.append(
             turtle_block(
                 f"{marker}{mapping_id}",
                 [
                     "a spot-am:AxisMapping",
                     *accuracy_predicate(axis["accuracy"]),
-                    f"spot-am:hasAxisRelationType spot-am:{axis['relation']}",
+                    f"spot-am:hasAxisRelationType spot-am:{relation}",
                     f"spot-am:hasSourceAxis {marker}{axis_id(source_suffix, axis['source'])}",
-                    f"spot-am:hasTargetAxis {marker}{axis_id(target_suffix, axis['target'])}",
+                    f"spot-am:hasTargetAxis {marker}{axis_id(target_suffix, target_axis)}",
                 ],
             )
         )

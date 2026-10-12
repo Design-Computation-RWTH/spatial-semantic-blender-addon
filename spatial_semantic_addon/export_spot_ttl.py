@@ -1534,6 +1534,26 @@ def stated_am_parts(
     description = stated_am(carrier)
     if description is None:
         return [], ""
+    if is_asset_space(target):
+        direction_of = lambda axis_name: helper_asset_axis_direction(target, axis_name)
+    elif is_document_space(target):
+        direction_of = default_document_axis_direction
+    else:
+        direction_of = lambda _axis_name: None
+
+    def target_axis_for(axis: dict) -> tuple[str, bool]:
+        """The target axis that points the way the input's does, and whether
+        it points the other way, which reverses the axis relation."""
+        direction = axis.get("target_direction")
+        if direction:
+            for axis_name in ("X", "Y", "Z"):
+                if direction_of(axis_name) == direction:
+                    return axis_name, False
+            for axis_name in ("X", "Y", "Z"):
+                if direction_of(axis_name) == opposite_direction(direction):
+                    return axis_name, True
+        return axis["target"], False
+
     return (
         stated_am_predicates(app_id, description, LOCAL_TERM_MARKER),
         stated_am_blocks(
@@ -1545,6 +1565,7 @@ def stated_am_parts(
             lambda local_name: stated_am_target_suffix(local_name, export_suffixes),
             LOCAL_TERM_MARKER,
             turtle_block,
+            target_axis_for,
         ),
     )
 

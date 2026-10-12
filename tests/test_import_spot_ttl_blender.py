@@ -400,6 +400,36 @@ def test_sheet_placements_keep_their_spot_am() -> None:
     print("Sheet placements keep their SPOT-AM test passed")
 
 
+def test_stated_axis_mappings_follow_the_anchor_axes() -> None:
+    """An axis mapping keeps its direction when the anchor names axes otherwise.
+
+    The bridge's X axis points to the rear; the model it is placed in keeps
+    the default X axis to the front. The importer resolves the spans with
+    the axis mapping reversed, so the export must point it at the model's
+    X axis as antiparallel, or a reader places the spans the other way.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+    anchor_turtle, turtle = bridge_fixture()
+    with tempfile.TemporaryDirectory(prefix="spot-axis-test-") as directory:
+        anchor_path = Path(directory) / "model.ttl"
+        anchor_path.write_text(anchor_turtle, encoding="utf8")
+        input_path = Path(directory) / "bridge.ttl"
+        input_path.write_text(turtle, encoding="utf8")
+        import_scene_graph_turtle(anchor_path)
+        anchor = next(obj for obj in bpy.data.objects if obj.get(PROP_HELPER))
+        assert anchor.spot_asset_axis_x_direction == "Front"
+        import_scene_graph_turtle(input_path, anchor_helper=anchor)
+        output_path = Path(directory) / "export.ttl"
+        export_helper_scene(output_path=output_path, asset_base_url="/assets")
+        text = output_path.read_text(encoding="utf8")
+    mapping = text.split("ex:appearance_span-1_in_model_AM_X a spot-am:AxisMapping", 1)[1]
+    mapping = mapping.split(" .\n", 1)[0]
+    assert "spot-am:hasAxisRelationType spot-am:Antiparallel" in mapping, mapping
+    assert "spot-am:hasTargetAxis ex:model_x_axis" in mapping, mapping
+    print("Stated axis mappings follow the anchor axes test passed")
+
+
 def test_spot_am_fuzzy_placement() -> None:
     """A damage located only by SPOT-AM boundary relations.
 
@@ -843,6 +873,7 @@ if __name__ == "__main__":
     test_document_appearances_do_not_win()
     test_plans_keep_their_files()
     test_sheet_placements_keep_their_spot_am()
+    test_stated_axis_mappings_follow_the_anchor_axes()
     test_spot_am_fuzzy_placement()
     test_spot_am_relation_to_other_space()
     test_dataset_folder_imports_live_spatial_mutations()

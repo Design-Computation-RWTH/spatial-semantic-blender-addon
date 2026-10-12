@@ -1444,6 +1444,10 @@ def describe_stated_am(
                     "target": axis_names[target_axis],
                     "relation": "Antiparallel" if antiparallel else "Codirectional",
                     "accuracy": am.accuracies.get(mapping_id),
+                    # The direction the input gives the target axis. The
+                    # space placed in may name its axes otherwise, as an
+                    # AssetSpace an import is placed in does.
+                    "target_direction": am.axis_directions.get(target_axis),
                 }
             )
         points = []

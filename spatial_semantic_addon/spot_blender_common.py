@@ -158,6 +158,16 @@ NAME_TAG_BROT = "BROT"
 NAME_TAG_DOT = "DOT"
 NAME_TAG_IFC = "IFC"
 NAME_TAG_PART = "PART"
+# The order `append_name_tags` writes tags in.
+NAME_TAG_ORDER = (
+    NAME_TAG_BOT,
+    NAME_TAG_BROT,
+    NAME_TAG_SPOT,
+    NAME_TAG_BEO,
+    NAME_TAG_DOT,
+    NAME_TAG_IFC,
+    NAME_TAG_PART,
+)
 SUPPORTED_NAME_TAGS = {
     NAME_TAG_BOT,
     NAME_TAG_SPOT,

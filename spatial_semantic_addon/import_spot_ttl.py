@@ -1370,7 +1370,7 @@ def build_imported_scene_spec(
             )
         # Only the graph names a referent's class. A class guessed from the
         # position in the tree would turn every leaf of a bridge into a
-        # `bot:Element`.
+        # `bot:Element`; an unclassed space is set in the SPOT Setup panel.
         bot_class = space.bot_class
         node = SpaceNodeSpec(
             role=role,

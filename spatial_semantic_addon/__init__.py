@@ -68,6 +68,14 @@ from .spot_transition import (
     write_transition_dataset,
 )
 from .dataset_snapshot import export_dataset_snapshot
+from .topology_setup import (
+    BOT_SETUP_CLASSES,
+    BROT_SETUP_CLASSES,
+    VOCABULARY_BOT,
+    VOCABULARY_BROT,
+    helper_topology_label,
+    set_helper_topology_class,
+)
 from .export_spatial_history import (
     DEFAULT_HISTORY_START,
     PROP_SIMULATE_PLACEMENT_CHANGE,
@@ -93,7 +101,6 @@ from .spot_blender_common import (
     PROP_ASSET_AXIS_X_DIRECTION,
     PROP_ASSET_AXIS_Y_DIRECTION,
     PROP_ASSET_AXIS_Z_DIRECTION,
-    PROP_BOT_CLASS,
     PROP_HELPER,
     PROP_LABEL,
     PROP_LOCAL_BBOX,
@@ -2131,6 +2138,71 @@ class SPOT_OT_create_ifc_bounding_box(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def selected_setup_helpers(context: bpy.types.Context) -> list[bpy.types.Object]:
+    """The helpers of the selected objects, each once, active first."""
+    settings = context.scene.spot_tools_settings
+    collection = bpy.data.collections.get(settings.helper_collection)
+    if collection is None or not collection.get(HELPER_COLLECTION_MARKER):
+        return []
+    candidates = [context.active_object, *context.selected_objects]
+    helpers: list[bpy.types.Object] = []
+    for candidate in candidates:
+        helper = helper_for_reference(candidate, collection)
+        if helper is not None and helper not in helpers:
+            helpers.append(helper)
+    return helpers
+
+
+class SPOT_OT_set_topology_class(bpy.types.Operator):
+    bl_idname = "spot.set_topology_class"
+    bl_label = "SPOT: Set Topology Class"
+    bl_description = (
+        "Set the BOT or BROT class of the entity each selected space represents"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    vocabulary: EnumProperty(
+        name="Vocabulary",
+        items=(
+            (VOCABULARY_BOT, "BOT", "Set a BOT class"),
+            (VOCABULARY_BROT, "BROT", "Set a BROT class"),
+            ("NONE", "None", "Clear the class"),
+        ),
+        default="NONE",
+        # Blender otherwise reuses the last values for a button that sets
+        # none, and Clear Class would repeat the previous Set as.
+        options={"SKIP_SAVE"},
+    )
+    class_name: StringProperty(
+        name="Class",
+        description="Class to set; empty clears the class",
+        default="",
+        options={"SKIP_SAVE"},
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        helpers = selected_setup_helpers(context)
+        if not helpers:
+            self.report({"ERROR"}, "Select one or more spaces or their SPOT helpers")
+            return {"CANCELLED"}
+        changed = 0
+        for helper in helpers:
+            try:
+                set_helper_topology_class(
+                    helper, self.vocabulary, self.class_name or None
+                )
+            except ValueError as error:
+                self.report({"WARNING"}, str(error))
+                continue
+            changed += 1
+        if self.class_name:
+            message = f"Set {changed} space(s) to {self.vocabulary.lower()}:{self.class_name}"
+        else:
+            message = f"Cleared the class of {changed} space(s)"
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
 class SPOT_OT_use_active_helper_for_test(bpy.types.Operator):
     bl_idname = "spot.use_active_helper_for_test"
     bl_label = "SPOT: Use Active Helper for Test"
@@ -2392,13 +2464,8 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
             )
         else:
             represents_box.label(text=f"Source: {represents_owner.name}")
-            own_bot_class = represents_helper.get(PROP_BOT_CLASS)
             represents_box.label(
-                text=(
-                    f"Own BOT class: bot:{own_bot_class}"
-                    if own_bot_class
-                    else "Own BOT class: none"
-                ),
+                text=f"Own class: {helper_topology_label(represents_helper)}"
             )
             add_row = represents_box.row(align=True)
             add_row.prop(settings, "represents_candidate", text="")
@@ -2689,6 +2756,53 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
         snapshot.spatial_history_start = settings.spatial_history_start
 
 
+class VIEW3D_PT_spot_setup(bpy.types.Panel):
+    bl_idname = "VIEW3D_PT_spot_setup"
+    bl_label = "SPOT Setup"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "SPOT"
+
+    def draw(self, context: bpy.types.Context) -> None:
+        layout = self.layout
+        helpers = selected_setup_helpers(context)
+        status = layout.box()
+        if not helpers:
+            status.label(text="Select spaces or their SPOT helpers", icon="INFO")
+        else:
+            status.label(text=f"{helper_display_name(helpers[0])}")
+            status.label(text=f"SPOT: {helpers[0].get(PROP_SPOT_CLASS, 'none')}")
+            status.label(text=f"Represents: {helper_topology_label(helpers[0])}")
+            if len(helpers) > 1:
+                status.label(text=f"{len(helpers)} spaces selected")
+
+        for title, classes, vocabulary in (
+            ("Set as BOT", BOT_SETUP_CLASSES, VOCABULARY_BOT),
+            ("Set as BROT (bridge)", BROT_SETUP_CLASSES, VOCABULARY_BROT),
+        ):
+            box = layout.box()
+            box.enabled = bool(helpers)
+            box.label(text=title)
+            grid = box.grid_flow(columns=2, even_columns=True, align=True)
+            for class_name in classes:
+                operator = grid.operator(
+                    SPOT_OT_set_topology_class.bl_idname,
+                    text=class_name,
+                )
+                operator.vocabulary = vocabulary
+                operator.class_name = class_name
+
+        clear_row = layout.row()
+        clear_row.enabled = bool(helpers)
+        clear = clear_row.operator(
+            SPOT_OT_set_topology_class.bl_idname,
+            text="Clear Class",
+            icon="X",
+        )
+        clear.vocabulary = "NONE"
+        clear.class_name = ""
+
+
 class VIEW3D_PT_spot_test(bpy.types.Panel):
     bl_idname = "VIEW3D_PT_spot_test"
     bl_label = "SPOT Test"
@@ -2960,9 +3074,11 @@ CLASSES = (
     SPOT_OT_create_ifc_bounding_box,
     SPOT_OT_project_asset_space_origin,
     SPOT_OT_set_asset_space_origin,
+    SPOT_OT_set_topology_class,
     SPOT_OT_use_active_helper_for_test,
     SPOT_OT_write_test_report,
     VIEW3D_PT_spot_tools,
+    VIEW3D_PT_spot_setup,
     VIEW3D_PT_spot_test,
     TOPBAR_MT_spot_tools,
 )

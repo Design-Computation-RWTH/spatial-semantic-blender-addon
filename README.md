@@ -246,7 +246,7 @@ The folder import uses the same current-state rules as the Graph Gateway. It mer
 
 The importer recreates the SPOT helper wireframes and hierarchy for checking. It uses the first `rdfs:label` when present. Otherwise, it uses the Turtle local name of the resource. When a space has multiple bounding boxes, the importer uses their enclosing axis-aligned bounding box. Multiple labels or bounding boxes produce import warnings. The importer does not recreate the original source meshes.
 If a space has no exported bounding box, the importer uses a tiny placeholder wireframe only for Blender visualization and keeps the missing bbox metadata implicit.
-The importer takes BOT, BEO, and BROT classes only from the `rdf:type` of the referent that a space `spot:represents`. It does not guess a class from the position of a space in the tree. If the graph gives no class, the helper gets no class.
+The importer takes BOT, BEO, and BROT classes only from the `rdf:type` of the referent that a space `spot:represents`. It does not guess a class from the position of a space in the tree. If the graph gives no class, the helper gets no class. Use the `SPOT Setup` panel to set one.
 
 #### Import into an existing AssetSpace
 
@@ -328,6 +328,25 @@ After the helper scene has been built, the addon sidebar exposes a small root-or
 - Run `Set Asset Space Origin` to move the site helper origin to the cursor while preserving the world-space positions of all descendant helpers.
 
 This makes it possible to switch the root asset-space frame from a centered bbox origin to a project-style anchor without rebuilding the helper hierarchy.
+
+### SPOT Setup Panel
+
+Use the `SPOT Setup` panel to set the class of the entity that a space represents.
+
+1. Select one or more spaces, or their SPOT helpers.
+2. Click a button under `Set as BOT` or `Set as BROT (bridge)`.
+3. To remove the class, click `Clear Class`. The space then represents no entity.
+
+A space has one class, from BOT or from [BROT](https://w3id.org/brot) (Bridge Topology Ontology 0.21). A BROT class replaces a BOT class, and a BOT class replaces a BROT class. Neither vocabulary implies the other. If no space uses BOT, the export contains no `bot:` term.
+
+The panel changes the tags in the helper name, for example from `SPOT::Imported::Element::SubStructureZone::BOT=Element::SPOT=VolumeSpace` to `SPOT::Imported::Element::SubStructureZone::BROT=SubStructure::SPOT=VolumeSpace`. If the helper has a source object or collection, the panel also changes the tags in the source name, so a rebuild of the helper scene keeps the class. References to a renamed object, such as SPOT Test slots and SPOT-AM reference objects, follow the new name.
+
+The export writes a hierarchy relation only if the parent and the child both have a class from the same vocabulary:
+
+- BOT: `bot:hasBuilding`, `bot:hasStorey`, `bot:hasSpace`, `bot:hasElement`, or `bot:containsZone` from a zone, and `bot:hasSubElement` from an element to an element.
+- BROT: `brot:containsZone` (zone to zone), `brot:containsComponent` (zone to component), `brot:aggregates` (component to component), `brot:hasJoint`, and `brot:hasCoating`. A joint or a coating directly under a zone gets no relation, because BROT does not make them components.
+
+BCF components can be BOT elements or BROT components, joints, and coatings.
 
 ### SPOT Test Panel
 

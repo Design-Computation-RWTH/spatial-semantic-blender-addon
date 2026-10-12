@@ -61,8 +61,17 @@ The Export panel exposes both the local Base IRI and its Turtle Prefix. For exam
 ### Dataset Snapshot Export
 
 Use `SPOT: Export Dataset Snapshot` to publish a folder under
-`<datasets>/exports/`. The action uses one UTC timestamp and writes deterministic
-scene RDF. Exports in the same second receive a numeric suffix.
+`<datasets>/exports/<project>/<timestamp>/`. Each project writes into a folder of
+its own, so exporting one project never replaces the newest snapshot of another.
+Set **Project** at the top of the SPOT panel to name the folder. A Blender
+file holds one project. If the name is empty, the folder takes the label of the
+root AssetSpace. The action uses one UTC timestamp and
+writes deterministic scene RDF. Exports in the same second receive a numeric
+suffix.
+
+The graph gateway loads the newest snapshot of any project by default. Use
+`npm start -- project <project>` in the demonstrator to load the newest
+snapshot of one project.
 
 Plans and photographs belong in `<datasets>/assets/`. Blender records stable
 `/assets/plans/<name>` or `/assets/images/<name>` references in RDF. It does not

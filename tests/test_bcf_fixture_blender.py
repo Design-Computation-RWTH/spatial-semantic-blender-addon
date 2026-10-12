@@ -205,7 +205,23 @@ def main() -> None:
             else:
                 os.environ["SPATIAL_SEMANTIC_DATASETS_DIR"] = previous_datasets_root
         configured_path = Path(configured_result["output_path"])
-        assert configured_path.parent == (configured_datasets_root / "exports").resolve()
+        # Each project writes into a folder of its own, named after its root
+        # AssetSpace unless a project name is set.
+        assert configured_path.parent == (
+            configured_datasets_root / "exports" / configured_result["project"]
+        ).resolve()
+        assert re.fullmatch(r"\d{8}T\d{6}Z(-\d+)?", configured_path.name)
+        assert configured_result["dataset_id"] == (
+            f"{configured_result['project']}/{configured_path.name}"
+        )
+
+        named_result = export_dataset_snapshot(
+            exports_root=root / "exports",
+            project_name="Domhof 6",
+        )
+        assert Path(named_result["output_path"]).parent == (
+            root / "exports" / "domhof-6"
+        ).resolve()
 
         snapshot_result = export_dataset_snapshot(exports_root=root / "exports")
         snapshot_path = Path(snapshot_result["output_path"])

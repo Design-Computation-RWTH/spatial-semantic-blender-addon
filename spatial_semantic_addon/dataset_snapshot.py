@@ -18,6 +18,11 @@ from .export_spot_ttl import (
 from .export_spatial_history import export_spatial_history
 from .spot_blender_common import (
     HELPER_COLLECTION_NAME,
+    PROP_HELPER,
+    PROP_LABEL,
+    PROP_SPOT_CLASS,
+    SPOT_CLASS_ASSET,
+    helper_root_objects,
     slugify,
 )
 
@@ -31,6 +36,49 @@ def _configured_datasets_root() -> str:
         if preferred_root:
             return bpy.path.abspath(preferred_root)
     return os.environ.get(DATASETS_ROOT_ENV, "")
+
+
+def project_slug(
+    project_name: str = "",
+    helper_collection_name: str = HELPER_COLLECTION_NAME,
+) -> str:
+    """The folder name a project's exports are written under.
+
+    Each project exports into `exports/<project>/`, so exporting one never
+    replaces another's newest snapshot. The name is the explicit project name
+    when one is set, else the label of the root AssetSpace, else the blend file.
+    """
+    if project_name.strip():
+        return slugify(project_name)
+    collection = bpy.data.collections.get(helper_collection_name)
+    if collection is not None:
+        for root in helper_root_objects(collection):
+            if root.get(PROP_HELPER) and root.get(PROP_SPOT_CLASS) == SPOT_CLASS_ASSET:
+                return slugify(str(root.get(PROP_LABEL, root.name)))
+    return slugify(Path(bpy.data.filepath).stem or "untitled")
+
+
+def project_snapshot_destination(
+    project: str,
+    exports_root: str | Path | None = None,
+) -> tuple[Path, Path, str]:
+    """A fresh snapshot folder for a project, a temporary folder beside it,
+    and the snapshot's timestamp.
+
+    The temporary folder shares the destination's parent, so moving it into
+    place with os.replace is atomic.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    root = (
+        Path(exports_root).expanduser().resolve()
+        if exports_root
+        else _default_exports_root()
+    )
+    project_root = root / project
+    project_root.mkdir(parents=True, exist_ok=True)
+    destination = _unique_snapshot_path(project_root, timestamp)
+    temporary = Path(tempfile.mkdtemp(prefix=".snapshot-", dir=project_root))
+    return destination, temporary, timestamp
 
 
 def _default_exports_root() -> Path:
@@ -61,23 +109,19 @@ def export_dataset_snapshot(
     local_prefix: str = DEFAULT_LOCAL_PREFIX,
     simulate_spatial_history: bool = False,
     spatial_history_start: str = "2025-01-01T09:00:00Z",
+    project_name: str = "",
 ) -> dict[str, object]:
-    """Atomically publish scene RDF and any explicitly authored BCF fixture."""
-    captured = datetime.now(timezone.utc).replace(microsecond=0)
-    timestamp = captured.strftime("%Y%m%dT%H%M%SZ")
-    blend_slug = slugify(Path(bpy.data.filepath).stem or "untitled")
-    root = (
-        Path(exports_root).expanduser().resolve()
-        if exports_root
-        else _default_exports_root()
-    )
-    root.mkdir(parents=True, exist_ok=True)
-    destination = _unique_snapshot_path(root, f"{timestamp}-{blend_slug}")
-    temporary = Path(tempfile.mkdtemp(prefix=".snapshot-", dir=root))
-
+    """Atomically publish scene RDF and any explicitly authored BCF fixture
+    into `exports/<project>/<timestamp>/`."""
     if bpy.data.collections.get(helper_collection_name) is None:
-        shutil.rmtree(temporary, ignore_errors=True)
         raise RuntimeError(f"Helper collection '{helper_collection_name}' was not found")
+    project = project_slug(project_name, helper_collection_name)
+    destination, temporary, timestamp = project_snapshot_destination(
+        project, exports_root
+    )
+    captured = datetime.strptime(timestamp, "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=timezone.utc
+    )
 
     try:
         rdf_dir = temporary / "rdf"
@@ -115,7 +159,8 @@ def export_dataset_snapshot(
         os.replace(temporary, destination)
         return {
             "output_path": str(destination),
-            "dataset_id": f"{blend_slug}-{timestamp}",
+            "dataset_id": f"{project}/{destination.name}",
+            "project": project,
             "timestamp": captured.isoformat(),
             "bcf_issue_count": bcf_result["issue_count"] if bcf_result else 0,
             "spatial_history_activity_count": (

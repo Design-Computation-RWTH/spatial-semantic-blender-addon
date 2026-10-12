@@ -940,8 +940,11 @@ def build_spot_test_report(context: bpy.types.Context) -> str:
 
 class SPOT_PG_scene_settings(bpy.types.PropertyGroup):
     project_collection: StringProperty(
-        name="Project Collection",
-        description="Optional explicit source root collection name used when building the helper scene",
+        name="Source Collection",
+        description=(
+            "Optional collection that Build reads its source objects from. Leave empty "
+            "to find the AssetSpace collection automatically"
+        ),
         default="",
     )
     helper_collection: StringProperty(
@@ -980,6 +983,14 @@ class SPOT_PG_scene_settings(bpy.types.PropertyGroup):
         name="History Start",
         description="ISO 8601 start time for simulated spatial registration activities",
         default=DEFAULT_HISTORY_START,
+    )
+    project_name: StringProperty(
+        name="Project",
+        description=(
+            "Name of this file's project. Its dataset snapshots go into "
+            "datasets/exports/<project>/. Empty uses the label of the root AssetSpace"
+        ),
+        default="",
     )
     picture_damage_candidate: PointerProperty(
         name="Damage",
@@ -1626,6 +1637,7 @@ class SPOT_OT_export_dataset_snapshot(bpy.types.Operator):
     def execute(self, context: bpy.types.Context) -> set[str]:
         try:
             result = export_dataset_snapshot(
+                project_name=context.scene.spot_tools_settings.project_name,
                 helper_collection_name=self.helper_collection,
                 base_iri=self.base_iri,
                 local_prefix=self.local_prefix,
@@ -2073,12 +2085,13 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
 
         helper_box = layout.box()
         helper_box.label(text="Helper Scene")
+        helper_box.prop(settings, "project_name", text="Project")
         helper_box.prop_search(
             settings,
             "project_collection",
             bpy.data,
             "collections",
-            text="Project",
+            text="Source Collection",
         )
         helper_box.prop_search(
             settings,

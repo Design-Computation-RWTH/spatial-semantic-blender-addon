@@ -1664,6 +1664,32 @@ def scaled_local_bbox(local_bbox: list[float], matrix: Matrix) -> list[float]:
     return [min(pair) for pair in corners] + [max(pair) for pair in corners]
 
 
+def helper_export_frame(matrix: Matrix, length_unit: str) -> Matrix:
+    """The frame a helper states its box and its children in.
+
+    A helper in metres drops its scale: the box takes it (see
+    `helper_export_bbox`). A helper in pixels keeps it. Its box is stated in
+    the pixels of its sheet, and its scale is the drawing scale that turns
+    those pixels into metres. Moved into the box, the drawing scale would be
+    read as `DOCUMENT_BLENDER_UNITS_PER_PIXEL`, and the region would no longer
+    fit its sheet.
+    """
+    if length_unit == LENGTH_UNIT_PIXEL:
+        return matrix.copy()
+    return frame_without_scale(matrix)
+
+
+def helper_export_bbox(
+    local_bbox: list[float],
+    matrix: Matrix,
+    length_unit: str,
+) -> list[float]:
+    """The box that goes with `helper_export_frame`, in Blender units."""
+    if length_unit == LENGTH_UNIT_PIXEL:
+        return list(local_bbox)
+    return scaled_local_bbox(local_bbox, matrix)
+
+
 def ensure_collection(
     scene: bpy.types.Scene,
     name: str,

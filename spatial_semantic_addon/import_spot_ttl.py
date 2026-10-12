@@ -14,7 +14,6 @@ from .build_spot_scene import (
     frame_without_scale,
     instantiate_helpers,
     save_blend_file,
-    scaled_local_bbox,
 )
 from .spot_am_placement import (
     AXIS_NAMES,
@@ -29,6 +28,7 @@ from .spot_am_placement import (
 )
 from .spot_transition import record_import_metadata
 from .spot_blender_common import (
+    scaled_local_bbox,
     BOT_CLASS_BUILDING,
     BOT_CLASS_ELEMENT,
     BOT_CLASS_SITE,
@@ -1619,11 +1619,23 @@ def build_imported_scene_spec(
         )
         # A sheet and what is laid out on it are stated in pixels and drawn
         # at the document scale; the export divides by it again. A pixel
-        # space in the building carries its scale in its matrix instead.
+        # space in the building, the physical helper of a plan region, has
+        # its box drawn at the document scale too. Its matrix carries the
+        # drawing scale from pixels to metres, so the frame takes the document
+        # scale back out, and the box still lands where the graph puts it.
         on_sheet = parent_length_unit in (None, LENGTH_UNIT_PIXEL)
+        pixel_in_building = (
+            not on_sheet
+            and space.length_unit == LENGTH_UNIT_PIXEL
+            and not space.approximate_region
+        )
         if parent_length_unit == LENGTH_UNIT_PIXEL:
             local_matrix.translation = local_matrix.translation * (
                 blender_units_per_length_unit(LENGTH_UNIT_PIXEL)
+            )
+        if pixel_in_building:
+            local_matrix = local_matrix @ Matrix.Scale(
+                1.0 / blender_units_per_length_unit(LENGTH_UNIT_PIXEL), 4
             )
         world_matrix = (
             parent_world_matrix @ local_matrix
@@ -1631,7 +1643,7 @@ def build_imported_scene_spec(
             else (root_world_matrix or Matrix.Identity(4)).copy()
         )
         local_bbox = space.local_bbox
-        if local_bbox is not None and on_sheet:
+        if local_bbox is not None and (on_sheet or pixel_in_building):
             # A region SPOT-AM derived is stated in its parent's units.
             unit = (
                 parent_length_unit

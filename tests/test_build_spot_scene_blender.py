@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -20,6 +21,7 @@ from spatial_semantic_addon.build_spot_scene import (
     collect_document_proxy_elements,
     find_ifc_project_collections,
     ifc_bounding_box_source_objects,
+    unscaled_source_frame,
 )
 from spatial_semantic_addon.export_spot_ttl import (
     LOCAL_TERM_MARKER,
@@ -30,6 +32,7 @@ from spatial_semantic_addon.export_spot_ttl import (
     exported_matrix_literal,
     export_space_axis_blocks,
     export_space_block,
+    exported_bbox_for_helper,
 )
 from spatial_semantic_addon.import_spot_ttl import import_scene_graph_turtle
 from spatial_semantic_addon.spot_blender_common import (
@@ -38,12 +41,14 @@ from spatial_semantic_addon.spot_blender_common import (
     PROP_HELPER,
     PROP_IFC_FILE,
     PROP_LABEL,
+    PROP_LENGTH_UNIT,
     PROP_LOCAL_BBOX,
     PROP_PLAN_KIND,
     PROP_REPRESENTS_LINKS,
     PROP_SOURCE_ASSET_PATH,
     PROP_SOURCE_IFC_CLASS,
     PROP_SPOT_CLASS,
+    LENGTH_UNIT_PIXEL,
     bbox_vertices,
     collection_object_named_like_collection,
     human_name,
@@ -570,6 +575,79 @@ def test_document_proxy_origin_already_centred_is_kept() -> None:
         round(value, 6) for value in element.helper_world_matrix.translation
     ) == (1.5, -0.75, 0.0)
     print("Centred document proxy test passed")
+
+
+# 6.38 mm per pixel: the drawing scale of the Domhof plan GC_030. A pixel is
+# 0.001 Blender units, so the helper of a plan region is scaled by 6.38.
+DRAWING_SCALE = 6.38
+REGION_BOX = [-1.505, -1.004, 0.0, 1.505, 1.004, 0.0]
+
+
+def test_physical_plan_helper_keeps_the_drawing_scale() -> None:
+    """
+    The physical helper of a plan region shares its box with the document
+    proxy, which lies unscaled on the sheet. So the drawing scale stays in the
+    frame, and the box stays the one the proxy has.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    collection = bpy.data.collections.new("Asset")
+    bpy.context.scene.collection.children.link(collection)
+    region = rectangle_object(
+        "GC 030_AA_Dachgeschoss",
+        collection,
+        [tuple(REGION_BOX[:3]), tuple(REGION_BOX[3:])],
+    )
+    region.matrix_basis = Matrix.Translation((2.0, 3.0, 0.0)) @ Matrix.Scale(
+        DRAWING_SCALE, 4
+    )
+    bpy.context.view_layer.update()
+
+    world_matrix, bbox = unscaled_source_frame(
+        region, list(REGION_BOX), parse_name_semantics(region.name)
+    )
+
+    assert [round(value, 6) for value in bbox] == REGION_BOX, bbox
+    assert [round(value, 6) for value in world_matrix.to_scale()] == [
+        DRAWING_SCALE
+    ] * 3, world_matrix
+    print("Physical plan helper scale test passed")
+
+
+def test_pixel_helper_exports_its_box_in_sheet_pixels() -> None:
+    """
+    A plan region placed in the building states its box in the pixels of its
+    sheet, and its matrix carries the drawing scale from pixels to metres.
+    Moving that scale into the box would make the region 6.38 times too large
+    on its sheet.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    asset = bpy.data.objects.new("Asset", None)
+    region = bpy.data.objects.new("Region", None)
+    for obj in (asset, region):
+        bpy.context.scene.collection.objects.link(obj)
+    region.parent = asset
+    region[PROP_SPOT_CLASS] = "HorizontalAreaSpace"
+    region[PROP_LENGTH_UNIT] = LENGTH_UNIT_PIXEL
+    region[PROP_LOCAL_BBOX] = REGION_BOX
+    region.matrix_basis = Matrix.Translation((2.0, 3.0, 0.0)) @ Matrix.Scale(
+        DRAWING_SCALE, 4
+    )
+    bpy.context.view_layer.update()
+
+    bbox = exported_bbox_for_helper(region, LENGTH_UNIT_PIXEL)
+    assert [round(value, 6) for value in bbox] == [
+        -1505.0,
+        -1004.0,
+        0.0,
+        1505.0,
+        1004.0,
+        0.0,
+    ], bbox
+
+    matrix = json.loads(exported_matrix_literal(region, asset, 6, set()))
+    assert [matrix[0], matrix[5], matrix[10]] == [0.00638] * 3, matrix
+    assert matrix[12:15] == [2.0, 3.0, 0.0], matrix
+    print("Pixel helper export test passed")
 
 
 def test_document_space_axes_declare_the_sheet_frame() -> None:
@@ -1145,6 +1223,8 @@ def test_asset_space_without_storeys_builds() -> None:
 
 
 if __name__ == "__main__":
+    test_physical_plan_helper_keeps_the_drawing_scale()
+    test_pixel_helper_exports_its_box_in_sheet_pixels()
     test_document_proxy_uses_the_same_local_frame_as_other_helpers()
     test_document_proxy_origin_already_centred_is_kept()
     test_document_space_axes_declare_the_sheet_frame()

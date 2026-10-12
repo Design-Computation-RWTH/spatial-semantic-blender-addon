@@ -286,7 +286,7 @@ To give the relations an extent:
 2. Set its axis directions in the SPOT panel (which axis points to the rear, left, and top).
 3. In the import file browser, select `Place Inside Active AssetSpace`.
 
-Run `Build` again first if the helper was built before scale handling was fixed: a helper built from a scaled object, such as a stretched cube, keeps a box of about 2 m in a stretched frame. The build now moves the source object's scale into the helper's box.
+Run `Build` again first if the helper was built before scale handling was fixed: a helper built from a scaled object, such as a stretched cube, keeps a box of about 2 m in a stretched frame. The build now moves the source object's scale into the helper's box. A helper in pixels is the exception. Its box is in the pixels of its sheet, and its scale is the drawing scale of the plan. The helper keeps this scale, so the box still fits the sheet.
 
 The active helper replaces the imported root AssetSpace. Its box and axis directions resolve every relation to the root. The imported spaces become its children. The rest of the helper collection stays. A repeated import replaces the helpers of the earlier import. When the root states other axis directions than the helper, the helper wins and the importer writes a warning.
 

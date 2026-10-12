@@ -10,7 +10,8 @@ from mathutils import Matrix, Vector
 
 from .spot_blender_common import (
     frame_without_scale,
-    scaled_local_bbox,
+    helper_export_bbox,
+    helper_export_frame,
     APPEARANCE_TARGET_ASSET,
     AmDerivedRegion,
     BOT_CLASS_BUILDING,
@@ -304,13 +305,23 @@ def unscaled_source_frame(
     local_bbox: list[float],
     semantics: NameSemantics,
 ) -> tuple[Matrix, list[float]]:
-    """The helper frame and box a source object with a local box adopts."""
+    """The helper frame and box a source object with a local box adopts.
+
+    The physical helper of a plan region is measured in the pixels of its
+    sheet, like its document proxy. Its scale is the drawing scale, so it
+    stays in the frame, and both helpers keep the same unscaled box.
+    """
+    length_unit = (
+        LENGTH_UNIT_PIXEL
+        if semantics.proxy_role == PROXY_ROLE_PHYSICAL
+        else LENGTH_UNIT_METER
+    )
     helper_bbox, local_center = source_local_frame(
-        scaled_local_bbox(local_bbox, obj.matrix_world), semantics
+        helper_export_bbox(local_bbox, obj.matrix_world, length_unit), semantics
     )
-    world_matrix = frame_without_scale(obj.matrix_world) @ Matrix.Translation(
-        local_center
-    )
+    world_matrix = helper_export_frame(
+        obj.matrix_world, length_unit
+    ) @ Matrix.Translation(local_center)
     return world_matrix, helper_bbox
 
 

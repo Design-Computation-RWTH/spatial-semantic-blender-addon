@@ -182,7 +182,34 @@ ex:area-in-document a spot:DocumentAppearance ;
 
     # The point space rides along with its parent area rather than orphaning.
     assert point.parent == area
+
+    # Exported again, the area keeps its box in the pixels of the sheet and
+    # the drawing scale in its asset appearance. Moving that scale into the
+    # box made the area 6 times too large on its sheet.
+    with tempfile.TemporaryDirectory(prefix="spot-doc-test-") as directory:
+        output_path = Path(directory) / "export.ttl"
+        export_helper_scene(output_path=output_path, asset_base_url="/assets")
+        text = output_path.read_text(encoding="utf8")
+    area_block = text.split("ex:area a spot:HorizontalAreaSpace", 1)[1].split(
+        " .\n", 1
+    )[0]
+    assert '"[-1500,-1000,0,1500,1000,0]"' in area_block, area_block
+    assert appearance_scale(text, "appearance_area_in_asset") == 0.006
+    assert appearance_translation(text, "appearance_area_in_asset") == (
+        8.0, 2.0, 7.0
+    )
+    assert appearance_translation(text, "appearance_point_in_area") == (
+        10.0, 20.0, 0.0
+    )
     print("Document appearance precedence test passed")
+
+
+def appearance_scale(text: str, appearance: str) -> float:
+    """The length of the X column of an exported appearance, to six decimals."""
+    block = text.split(f"ex:{appearance} a ", 1)[1].split(" .\n", 1)[0]
+    literal = block.split('gom:hasTransformationMatrix "[', 1)[1].split("]", 1)[0]
+    values = [float(value) for value in literal.split(",")]
+    return round(sum(value * value for value in values[0:3]) ** 0.5, 6)
 
 
 def appearance_translation(text: str, appearance: str) -> tuple[float, ...]:

@@ -22,8 +22,8 @@ from .bcf_authoring import (
 )
 
 from .spot_blender_common import (
-    frame_without_scale,
-    scaled_local_bbox,
+    helper_export_bbox,
+    helper_export_frame,
     BOT_CLASS_BUILDING,
     BOT_CLASS_ELEMENT,
     BOT_CLASS_SITE,
@@ -912,7 +912,7 @@ def exported_bbox_for_helper(
     if bbox is None:
         return None
 
-    bbox = scaled_local_bbox(bbox, helper.matrix_world)
+    bbox = helper_export_bbox(bbox, helper.matrix_world, length_unit)
     bbox = convert_bbox_from_blender_units(bbox, length_unit)
     if is_plan_space(helper):
         bbox[2] = 0.0
@@ -926,17 +926,15 @@ def exported_matrix_literal(
     precision: int,
     document_backed_helper_names: set[str],
 ) -> str:
-    # Placement only: any scale on the helpers goes into their boxes (see
-    # exported_bbox_for_helper), so a box scaled by hand is stated in metres
-    # and its matrix stays a rotation and a translation.
-    relative = frame_without_scale(parent.matrix_world).inverted_safe() @ (
-        frame_without_scale(helper.matrix_world)
+    # A helper in metres states placement only: its scale goes into its box
+    # (see exported_bbox_for_helper), so a box scaled by hand is stated in
+    # metres. A helper in pixels keeps the drawing scale in its frame.
+    helper_unit = helper_length_unit(helper, document_backed_helper_names)
+    parent_unit = helper_length_unit(parent, document_backed_helper_names)
+    relative = helper_export_frame(parent.matrix_world, parent_unit).inverted_safe() @ (
+        helper_export_frame(helper.matrix_world, helper_unit)
     )
-    matrix = convert_matrix_between_units(
-        relative,
-        helper_length_unit(helper, document_backed_helper_names),
-        helper_length_unit(parent, document_backed_helper_names),
-    )
+    matrix = convert_matrix_between_units(relative, helper_unit, parent_unit)
     return matrix_to_column_major_literal(matrix, precision)
 
 

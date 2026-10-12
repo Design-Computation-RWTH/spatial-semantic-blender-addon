@@ -116,6 +116,10 @@ PROP_SOURCE_COLLECTION = "spot_source_collection"
 PROP_SOURCE_IFC_CLASS = "spot_source_ifc_class"
 PROP_SOURCE_DEFINITION_ID = "spot_source_ifc_definition_id"
 PROP_SOURCE_ASSET_PATH = "spot_source_asset_path"
+# Set when the graph itself linked the space to its file, as an imported
+# extracted view can be. Such a space owns its file, see
+# `asset_filename_for_helper`, unlike a path guessed from a name.
+PROP_OWN_ASSET = "spot_own_asset"
 # Set on an IFC bounding box: the `IfcProject/...` collection it stands for.
 PROP_IFC_BOUNDING_BOX_SOURCE = "spot_ifc_bounding_box_source"
 # Set on an IFC bounding box: the file name of the IFC model in the assets,
@@ -418,6 +422,7 @@ class SpaceNodeSpec:
     source_ifc_class: str | None = None
     source_definition_id: int | None = None
     source_asset_path: str | None = None
+    own_asset: bool = False
     plan_kind: str | None = None
     # A point space located only approximately by SPOT-AM is drawn as the
     # region it may occupy rather than as a point marker.
@@ -2133,6 +2138,8 @@ def create_helper_object(
         helper[PROP_SOURCE_IFC_CLASS] = spec.source_ifc_class
     if spec.source_definition_id is not None:
         helper[PROP_SOURCE_DEFINITION_ID] = spec.source_definition_id
+    if spec.own_asset:
+        helper[PROP_OWN_ASSET] = True
     if spec.source_asset_path is not None:
         helper[PROP_SOURCE_ASSET_PATH] = spec.source_asset_path
     elif PROP_SOURCE_ASSET_PATH in helper:

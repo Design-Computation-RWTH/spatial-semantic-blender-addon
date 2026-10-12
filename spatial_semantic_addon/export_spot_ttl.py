@@ -37,6 +37,7 @@ from .spot_blender_common import (
     PROP_BOT_URI_SUFFIX,
     PROP_DOT_CLASS,
     PROP_HELPER,
+    PROP_OWN_ASSET,
     PROP_LABEL,
     PROP_LENGTH_UNIT,
     PROP_LOCAL_BBOX,
@@ -662,6 +663,8 @@ def helper_media_type(helper: bpy.types.Object) -> str | None:
         return "image/jpeg"
     if suffix == ".webp":
         return "image/webp"
+    if suffix == ".pdf":
+        return "application/pdf"
     if suffix == ".ifc":
         # The STEP physical file media type. IFC-SPF is a STEP exchange file,
         # and this is what the gateway serves `.ifc` bytes as.
@@ -670,14 +673,15 @@ def helper_media_type(helper: bpy.types.Object) -> str | None:
 
 
 def asset_filename_for_helper(helper: bpy.types.Object) -> str | None:
-    # Only source documents, photographs and whole IFC models own media
-    # distributions. Older helper scenes may still contain inferred paths on
-    # extracted area spaces; ignore those instead of publishing one nonexistent
-    # asset per area.
+    # Only source documents, photographs, whole IFC models and spaces whose
+    # file the graph linked own media distributions. Older helper scenes may
+    # still contain inferred paths on extracted area spaces; ignore those
+    # instead of publishing one nonexistent asset per area.
     if (
         not is_point_space(helper)
         and helper.get(PROP_SPOT_CLASS) != "DocumentSpace"
         and not is_ifc_model_space(helper)
+        and not helper.get(PROP_OWN_ASSET)
     ):
         return None
     asset_path = helper_asset_path(helper)

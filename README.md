@@ -248,6 +248,19 @@ The importer recreates the SPOT helper wireframes and hierarchy for checking. It
 If a space has no exported bounding box, the importer uses a tiny placeholder wireframe only for Blender visualization and keeps the missing bbox metadata implicit.
 The importer takes BOT, BEO, and BROT classes only from the `rdf:type` of the referent that a space `spot:represents`. It does not guess a class from the position of a space in the tree. If the graph gives no class, the helper gets no class. Use the `SPOT Setup` panel to set one.
 
+#### Plans and files
+
+The importer keeps the file of each `DocumentSpace`, `PointSpace`, and area space (`AreaSpace`, `HorizontalAreaSpace`, `VerticalAreaSpace`). It reads `dcat:accessURL` or `dcat:downloadURL` on the space, on its `dcat:distribution`, or on the result of the observation that the space represents. A path such as `..\InputPublic\Plans\002.pdf` is accepted.
+
+The export writes each file as a `dcat:Distribution` of its space, with `dcat:accessURL`, `dcat:downloadURL`, `dcat:mediaType`, `dcterms:format`, and `dcterms:title`. Only the file name is kept:
+
+- A document or an area space links `/assets/plans/<name>`, for example `application/pdf` for a PDF sheet.
+- A photograph links `/assets/images/<name>`.
+
+Copy the files into `<datasets>/assets/plans/` and `<datasets>/assets/images/`. The export does not copy them. An area space built from a Blender name, such as `Floorplan_EG`, gets no file of its own: its file belongs to its `DocumentSpace`. Only a file that the imported graph links to the area space itself is exported.
+
+A `DocumentSpace` becomes a root helper of its own, as the export writes a sheet. If the graph gives no unit, the sheet is in pixels. Its box is drawn at 1 px = 0.001 Blender units, and the export gives the pixels back. A space that is placed in the building and also laid out on a sheet keeps only its building placement, and the importer warns about it. A space that is only laid out on a sheet is dropped.
+
 #### Import into an existing AssetSpace
 
 Some datasets locate their spaces only with SPOT-AM relations, for example "Span_2 meets the rear of Span_1", and give the root AssetSpace no bounding box. SPOT-AM relations are fractions of a target's extent, so without a box every space stays at the origin.
@@ -356,7 +369,7 @@ The export writes a `sosa:Observation` for a photograph only if its PointSpace i
 2. Click `Set as Camera` in the `Photograph` box.
 3. If one PointSpace without an image is selected, choose the image file.
 
-The importer keeps the image of a PointSpace. It reads `dcat:accessURL` or `dcat:downloadURL` on the space, on its `dcat:distribution`, or on the result of the observation that the space represents. The image file name goes to `/assets/images/<name>`.
+The importer keeps the image of a PointSpace, see [Plans and files](#plans-and-files).
 
 A camera object replaces the helper in the `SPOT Scene` collection. It keeps the name, the properties, the parent, the transform, and all references of the helper. It looks along its local -Z axis, as a camera in a built scene does. To aim the camera, turn it. You can change the lens on the camera data. The camera holds the picture controls, such as damages and BCF issues.
 

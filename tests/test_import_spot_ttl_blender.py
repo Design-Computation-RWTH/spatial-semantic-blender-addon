@@ -13,6 +13,7 @@ if str(REPOSITORY) not in sys.path:
     sys.path.insert(0, str(REPOSITORY))
 
 import spatial_semantic_addon
+from spatial_semantic_addon.export_spot_ttl import export_helper_scene
 from spatial_semantic_addon.import_spot_ttl import import_scene_graph_turtle
 from spatial_semantic_addon.spot_blender_common import (
     PROP_HELPER,
@@ -89,7 +90,8 @@ def test_document_appearances_do_not_win() -> None:
     """A space placed both in an asset space and on a drawing sheet.
 
     The document appearance is stated last on purpose: the asset appearance
-    must still win, and the document space must not survive as a second root.
+    must still win. The document space survives as a second root, as this
+    add-on exports a sheet, but nothing is laid out on it.
     """
     bpy.ops.wm.read_factory_settings(use_empty=True)
     turtle = """\
@@ -147,10 +149,18 @@ ex:area-in-document a spot:DocumentAppearance ;
     helpers = [obj for obj in bpy.data.objects if obj.get(PROP_HELPER)]
     labels = {str(helper[PROP_LABEL]) for helper in helpers}
 
-    # The document space is dropped; asset, area and point survive.
-    assert labels == {"Asset", "Storey", "Damage"}, labels
+    assert labels == {"Asset", "Sheet", "Storey", "Damage"}, labels
     assert result["root_label"] == "Asset"
-    assert len(result["root_helper_names"]) == 1
+    assert len(result["root_helper_names"]) == 2
+    assert any(
+        "building placement of 1 spaces" in warning for warning in result["warnings"]
+    ), result["warnings"]
+    sheet = next(helper for helper in helpers if helper[PROP_LABEL] == "Sheet")
+    assert sheet.parent is None and not sheet.children
+    # The pixel box is drawn at the document scale, 1 px = 0.001 Blender units.
+    assert [round(value, 3) for value in sheet[PROP_LOCAL_BBOX]] == [
+        0.0, -6.38, 0.0, 14.382, 0.0, 0.0
+    ]
 
     area = next(helper for helper in helpers if helper[PROP_LABEL] == "Storey")
     point = next(helper for helper in helpers if helper[PROP_LABEL] == "Damage")
@@ -163,6 +173,68 @@ ex:area-in-document a spot:DocumentAppearance ;
     # The point space rides along with its parent area rather than orphaning.
     assert point.parent == area
     print("Document appearance precedence test passed")
+
+
+def test_plans_keep_their_files() -> None:
+    """A sheet and its extracted view keep the files the graph links them to.
+
+    The input links each file directly on the space, as some tools write it;
+    the export states them as this add-on does, through a dcat:Distribution.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    turtle = """\
+@prefix ex: <https://example.org/scene/> .
+@prefix spot: <https://w3id.org/spot#> .
+@prefix spot-sg: <https://w3id.org/spot/sg#> .
+@prefix gom: <https://w3id.org/gom#> .
+@prefix qudt: <http://qudt.org/schema/qudt/> .
+@prefix unit: <http://qudt.org/vocab/unit/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
+
+ex:asset a spot:AssetSpace ;
+    rdfs:label "Asset" ;
+    qudt:hasUnit unit:M ;
+    spot-sg:hasBoundingBox "[0,0,0,10,10,10]"^^spot-sg:boundingBoxArray .
+
+ex:sheet a spot:DocumentSpace ;
+    rdfs:label "Sheet" ;
+    spot-sg:hasBoundingBox "[0,-6380,0,14382,0,0]"^^spot-sg:boundingBoxArray ;
+    dcat:accessURL "..\\\\Plans\\\\002.pdf" .
+
+ex:view a spot:VerticalAreaSpace ;
+    rdfs:label "Section" ;
+    qudt:hasUnit unit:M ;
+    spot-sg:hasBoundingBox "[0,0,0,2,0,1]"^^spot-sg:boundingBoxArray ;
+    dcat:accessURL "SingleViews\\\\002\\\\Section A-A.jpg" ;
+    spot:hasAppearance ex:view-in-asset, ex:view-in-sheet .
+
+ex:view-in-asset a spot:AssetAppearance ;
+    spot:appearsIn ex:asset ;
+    gom:hasTransformationMatrix "[1,0,0,0,0,1,0,0,0,0,1,0,1,2,3,1]"^^gom:columnMajorArray .
+
+ex:view-in-sheet a spot:DocumentAppearance ;
+    spot:appearsIn ex:sheet ;
+    gom:hasTransformationMatrix "[1,0,0,0,0,1,0,0,0,0,1,0,100,-200,0,1]"^^gom:columnMajorArray .
+"""
+
+    with tempfile.TemporaryDirectory(prefix="spot-plan-test-") as directory:
+        input_path = Path(directory) / "plans.ttl"
+        input_path.write_text(turtle, encoding="utf8")
+        import_scene_graph_turtle(input_path)
+        output_path = Path(directory) / "export.ttl"
+        export_helper_scene(output_path=output_path, asset_base_url="/assets")
+        text = output_path.read_text(encoding="utf8")
+
+    assert "ex:sheet a spot:DocumentSpace" in text, text
+    assert "qudt:hasUnit unit:PIXEL" in text
+    assert '"[0,-6380,0,14382,0,0]"^^spot-sg:boundingBoxArray' in text, text
+    assert "ex:sheet dcat:distribution ex:distribution_sheet ." in text
+    assert "dcat:accessURL </assets/plans/002.pdf>" in text
+    assert 'dcat:mediaType "application/pdf"' in text
+    assert "ex:view dcat:distribution ex:distribution_view ." in text
+    assert "dcat:accessURL </assets/plans/Section%20A-A.jpg>" in text
+    print("Plans keep their files test passed")
 
 
 def test_spot_am_fuzzy_placement() -> None:
@@ -606,6 +678,7 @@ ex:Section_BPM_Z a spot-am:BoundaryPointMapping ;
 if __name__ == "__main__":
     main()
     test_document_appearances_do_not_win()
+    test_plans_keep_their_files()
     test_spot_am_fuzzy_placement()
     test_spot_am_relation_to_other_space()
     test_dataset_folder_imports_live_spatial_mutations()

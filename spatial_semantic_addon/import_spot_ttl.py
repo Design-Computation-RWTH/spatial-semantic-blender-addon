@@ -42,6 +42,7 @@ from .spot_blender_common import (
     PROP_REPRESENTS_LINKS,
     PROP_URI_SUFFIX,
     ROLE_BUILDING,
+    ROLE_DOCUMENT,
     ROLE_ELEMENT,
     ROLE_MODEL,
     ROLE_SITE,
@@ -54,6 +55,7 @@ from .spot_blender_common import (
     append_name_tags,
     bbox_vertices,
     blender_script_argv,
+    blender_units_per_length_unit,
     helper_asset_axis_direction,
     helper_local_bbox,
     reset_helper_collection,
@@ -70,6 +72,15 @@ SPOT_CLASS_DOCUMENT_SPACE = "DocumentSpace"
 # them represents a BOT referent that another space also represents, the other
 # space owns it and the plan only links to it.
 LINKING_SPOT_CLASSES = {"HorizontalAreaSpace", "VerticalAreaSpace"}
+
+# The spaces whose own file the importer keeps.
+FILE_SPOT_CLASSES = {
+    "PointSpace",
+    "DocumentSpace",
+    "AreaSpace",
+    "HorizontalAreaSpace",
+    "VerticalAreaSpace",
+}
 
 KNOWN_PREFIXES = {
     "beo": "https://pi.pauwel.be/voc/buildingelement#",
@@ -124,7 +135,8 @@ class ImportedSpace:
     bot_class: str | None = None
     beo_class: str | None = None
     brot_class: str | None = None
-    # The image of a photograph's PointSpace, as the input links it.
+    # The file of a photograph, a document or an extracted view, as the
+    # input links it.
     asset_path: str | None = None
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
     parent_iri: str | None = None
@@ -560,6 +572,8 @@ def infer_role(
     if space.bot_class == BOT_CLASS_ELEMENT:
         return ROLE_ELEMENT
 
+    if space.spot_class == SPOT_CLASS_DOCUMENT_SPACE:
+        return ROLE_DOCUMENT
     if parent_role is None or space.spot_class == "AssetSpace":
         return ROLE_SITE
     if parent_role == ROLE_SITE:
@@ -583,6 +597,8 @@ def helper_name_for_import(
 ) -> str:
     if role == ROLE_SITE:
         base_name = f"SPOT::Imported::Site::{local_name}"
+    elif role == ROLE_DOCUMENT:
+        base_name = f"SPOT::Imported::Document::{local_name}"
     elif role == ROLE_BUILDING:
         base_name = f"SPOT::Imported::Building::{local_name}"
     elif role == ROLE_MODEL:
@@ -788,7 +804,9 @@ def apply_spot_am_placements(
         root_without_extent = [
             space.local_name
             for space in spaces.values()
-            if space.parent_iri is None and space.local_bbox is None
+            if space.parent_iri is None
+            and space.local_bbox is None
+            and space.spot_class != SPOT_CLASS_DOCUMENT_SPACE
         ]
         hint = (
             f"; the root {', '.join(root_without_extent)} has no bounding box, so "
@@ -839,8 +857,8 @@ def parse_scene_graph_turtle(
     bot_types: dict[str, str] = {}
     beo_types: dict[str, str] = {}
     brot_types: dict[str, str] = {}
-    # Image URLs and the links that lead to them: a distribution, or an
-    # observation's result. See `resolve_picture_asset_paths`.
+    # File URLs and the links that lead to them: a distribution, or an
+    # observation's result. See `resolve_asset_paths`.
     media_urls: dict[str, str] = {}
     media_links: dict[str, list[str]] = {}
     order = 0
@@ -1061,6 +1079,9 @@ def parse_scene_graph_turtle(
                 length_unit=(
                     parse_length_unit(predicates["qudt:hasUnit"])
                     if "qudt:hasUnit" in predicates
+                    # A sheet is measured in pixels unless it says otherwise.
+                    else LENGTH_UNIT_PIXEL
+                    if parse_prefixed_local_name(spot_type) == SPOT_CLASS_DOCUMENT_SPACE
                     else LENGTH_UNIT_METER
                 ),
                 represented_iris=split_turtle_object_list(
@@ -1192,20 +1213,24 @@ def parse_scene_graph_turtle(
             "document sheet"
         )
 
-    document_spaces = {
-        space_id
-        for space_id, space in spaces.items()
-        if space.spot_class == SPOT_CLASS_DOCUMENT_SPACE
+    # A DocumentSpace stays as a root of its own, as this add-on exports a
+    # sheet, so its file is kept. What is laid out on it is not: a space
+    # placed elsewhere keeps only that placement.
+    sheet_placed_elsewhere = {
+        source_iri
+        for appearance_id, source_iri in appearance_sources.items()
+        if appearance_priority(appearance_types.get(appearance_id)) <= 0
+        and source_iri not in document_only_spaces
     }
-    if document_spaces:
+    if sheet_placed_elsewhere:
         warning_messages.append(
-            f"Dropped {len(document_spaces)} document spaces; their contents were "
-            "kept where another placement exists"
+            f"Kept only the building placement of {len(sheet_placed_elsewhere)} "
+            "spaces that are also laid out on a document sheet"
         )
 
     # A space whose only placement was on a sheet takes its descendants with it:
     # they were positioned relative to it and have nowhere else to go.
-    dropped_spaces = document_only_spaces | document_spaces
+    dropped_spaces = set(document_only_spaces)
     pending = list(dropped_spaces)
     while pending:
         dropped_id = pending.pop()
@@ -1214,9 +1239,7 @@ def parse_scene_graph_turtle(
                 dropped_spaces.add(space_id)
                 pending.append(space_id)
 
-    orphaned_count = len(dropped_spaces) - len(document_only_spaces) - len(
-        document_spaces
-    )
+    orphaned_count = len(dropped_spaces) - len(document_only_spaces)
     if orphaned_count:
         warning_messages.append(
             f"Dropped {orphaned_count} spaces that were only placed below "
@@ -1262,9 +1285,16 @@ def parse_scene_graph_turtle(
     for space in spaces.values():
         space.children.sort(key=lambda child_id: spaces[child_id].order)
     assign_represented_referents(spaces, bot_types, beo_types, brot_types)
-    resolve_picture_asset_paths(spaces, media_urls, media_links)
+    resolve_asset_paths(spaces, media_urls, media_links)
 
-    return spaces, sorted(root_ids, key=lambda space_id: spaces[space_id].order)
+    # The building comes first: the result names it as the root.
+    return spaces, sorted(
+        root_ids,
+        key=lambda space_id: (
+            spaces[space_id].spot_class == SPOT_CLASS_DOCUMENT_SPACE,
+            spaces[space_id].order,
+        ),
+    )
 
 
 def parse_url_object(value: str) -> str:
@@ -1276,20 +1306,22 @@ def parse_url_object(value: str) -> str:
     return value
 
 
-def resolve_picture_asset_paths(
+def resolve_asset_paths(
     spaces: dict[str, ImportedSpace],
     media_urls: dict[str, str],
     media_links: dict[str, list[str]],
 ) -> None:
     """
-    Keep the image of each PointSpace so the space can become a camera.
+    Keep the file of each photograph, document and extracted view.
 
-    The image is linked on the space itself, through its distribution, or,
-    as this add-on exports it, from the observation the space represents
-    through the observation's result and that result's distribution.
+    A PointSpace's image lets the space become a camera; a document's or a
+    view's file is exported as its distribution. The file is linked on the
+    space itself, through its distribution, or, as this add-on exports a
+    photograph, from the observation the space represents through the
+    observation's result and that result's distribution.
     """
     for space in spaces.values():
-        if space.spot_class != "PointSpace":
+        if space.spot_class not in FILE_SPOT_CLASSES:
             continue
         pending = [space.iri]
         seen: set[str] = set()
@@ -1415,8 +1447,14 @@ def build_imported_scene_spec(
             if parent_world_matrix is not None
             else (root_world_matrix or Matrix.Identity(4)).copy()
         )
-        if space.local_bbox is not None:
-            world_bbox = local_bbox_to_world_bbox(space.local_bbox, world_matrix)
+        local_bbox = space.local_bbox
+        if local_bbox is not None and parent_world_matrix is None:
+            # A root is drawn in Blender units; the export divides a sheet's
+            # box by the same scale to give its pixels back.
+            scale = blender_units_per_length_unit(space.length_unit)
+            local_bbox = [value * scale for value in local_bbox]
+        if local_bbox is not None:
+            world_bbox = local_bbox_to_world_bbox(local_bbox, world_matrix)
         else:
             origin = world_matrix.translation.copy()
             world_bbox = Aabb(
@@ -1448,9 +1486,8 @@ def build_imported_scene_spec(
             length_unit=space.length_unit,
             beo_class=space.beo_class,
             source_asset_path=space.asset_path,
-            local_bbox=(
-                list(space.local_bbox) if space.local_bbox is not None else None
-            ),
+            own_asset=space.asset_path is not None,
+            local_bbox=list(local_bbox) if local_bbox is not None else None,
             sort_key=f"{depth:03d}:{space.order:05d}:{slugify(space.label)}",
             source_name=space.local_name,
             approximate_region=space.approximate_region,

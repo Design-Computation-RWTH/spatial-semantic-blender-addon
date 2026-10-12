@@ -1793,7 +1793,11 @@ def write_turtle(
             lines.append(am_source_boundary_blocks)
             lines.append("")
         distribution_block = ""
-        if helper.name not in document_backed_helper_names:
+        # A plan laid out on a sheet uses the sheet's file, unless the graph
+        # gave the plan a file of its own.
+        if helper.name not in document_backed_helper_names or helper.get(
+            PROP_OWN_ASSET
+        ):
             distribution_block = export_distribution_block(
                 helper,
                 export_suffixes,

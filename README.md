@@ -259,7 +259,18 @@ The export writes each file as a `dcat:Distribution` of its space, with `dcat:ac
 
 Copy the files into `<datasets>/assets/plans/` and `<datasets>/assets/images/`. The export does not copy them. An area space built from a Blender name, such as `Floorplan_EG`, gets no file of its own: its file belongs to its `DocumentSpace`. Only a file that the imported graph links to the area space itself is exported.
 
-A `DocumentSpace` becomes a root helper of its own, as the export writes a sheet. If the graph gives no unit, the sheet is in pixels. Its box is drawn at 1 px = 0.001 Blender units, and the export gives the pixels back. A space that is placed in the building and also laid out on a sheet keeps only its building placement, and the importer warns about it. A space that is only laid out on a sheet is dropped.
+A `DocumentSpace` becomes a flat root helper of its own, as the export writes a sheet:
+
+- If the graph gives no unit, the sheet is in pixels. Its box is drawn at 1 px = 0.001 Blender units, and the export gives the pixels back.
+- If the graph gives no box, the sheet is a 1 x 1 plane: `[0,-1000,0,1000,0,0]` in pixels, with Y pointing down the page. The export writes this box.
+- The sheets lie side by side next to the origin, 2 Blender units apart. This only affects the view in Blender: a root has no exported placement.
+
+What is laid out on a sheet comes with it:
+
+- A space that is only on a sheet becomes a child of the sheet. If the graph gives no unit, the space is measured like the sheet.
+- A space that is in the building and on a sheet becomes a pair, as the scene builder makes for a plan. The physical helper stays in the building. A document proxy, named `<space>_on_<sheet>`, lays it out on the sheet. The export writes a `spot:DocumentAppearance` of the space in the sheet from the proxy, next to its building appearance. A space laid out on more than one sheet keeps only the first, and the importer warns about it.
+- A sheet placement with SPOT-AM relations gets the region the relations give on the sheet, as in the building. The importer resolves the relations in page coordinates, with Y down the page, and draws the result with the top edge of the page at y = 0.
+- The export states a sheet placement with a matrix, as for every imported SPOT-AM placement. It does not write the SPOT-AM relations again.
 
 #### Import into an existing AssetSpace
 

@@ -423,6 +423,11 @@ class SpaceNodeSpec:
     source_definition_id: int | None = None
     source_asset_path: str | None = None
     own_asset: bool = False
+    # A pair of helpers for one space: the physical one where the space is,
+    # and the document one where it is laid out on a sheet. Names usually
+    # say this; an imported pair states it here.
+    proxy_role: str | None = None
+    shared_entity_key: str | None = None
     plan_kind: str | None = None
     # A point space located only approximately by SPOT-AM is drawn as the
     # region it may occupy rather than as a point marker.
@@ -2154,6 +2159,9 @@ def create_helper_object(
             helper[PROP_PROXY_ROLE] = semantics.proxy_role
         if semantics.shared_entity_key is not None:
             helper[PROP_SHARED_ENTITY_KEY] = semantics.shared_entity_key
+    if spec.proxy_role is not None:
+        helper[PROP_PROXY_ROLE] = spec.proxy_role
+        helper[PROP_SHARED_ENTITY_KEY] = spec.shared_entity_key
     if spec.source_collections:
         helper[PROP_SOURCE_COLLECTIONS] = json.dumps(
             spec.source_collections, ensure_ascii=True

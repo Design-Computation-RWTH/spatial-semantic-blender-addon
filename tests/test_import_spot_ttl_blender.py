@@ -91,7 +91,7 @@ def test_document_appearances_do_not_win() -> None:
 
     The document appearance is stated last on purpose: the asset appearance
     must still win. The document space survives as a second root, as this
-    add-on exports a sheet, but nothing is laid out on it.
+    add-on exports a sheet, and a document proxy lays the area out on it.
     """
     bpy.ops.wm.read_factory_settings(use_empty=True)
     turtle = """\
@@ -152,17 +152,27 @@ ex:area-in-document a spot:DocumentAppearance ;
     assert labels == {"Asset", "Sheet", "Storey", "Damage"}, labels
     assert result["root_label"] == "Asset"
     assert len(result["root_helper_names"]) == 2
-    assert any(
-        "building placement of 1 spaces" in warning for warning in result["warnings"]
-    ), result["warnings"]
     sheet = next(helper for helper in helpers if helper[PROP_LABEL] == "Sheet")
-    assert sheet.parent is None and not sheet.children
+    assert sheet.parent is None
+    # The area is a pair: the physical helper in the asset, and a document
+    # proxy on the sheet at the sheet placement, 1 px = 0.001 Blender units.
+    (proxy,) = sheet.children
+    assert proxy[PROP_LABEL] == "Storey"
+    assert proxy["spot_proxy_role"] == "document"
+    local = sheet.matrix_world.inverted() @ proxy.matrix_world.translation
+    assert tuple(round(value, 3) for value in local) == (10.471, -0.977, 0.0), local
     # The pixel box is drawn at the document scale, 1 px = 0.001 Blender units.
     assert [round(value, 3) for value in sheet[PROP_LOCAL_BBOX]] == [
         0.0, -6.38, 0.0, 14.382, 0.0, 0.0
     ]
 
-    area = next(helper for helper in helpers if helper[PROP_LABEL] == "Storey")
+    area = next(
+        helper
+        for helper in helpers
+        if helper[PROP_LABEL] == "Storey" and helper.parent is not sheet
+    )
+    assert area["spot_proxy_role"] == "physical"
+    assert area["spot_shared_entity_key"] == proxy["spot_shared_entity_key"]
     point = next(helper for helper in helpers if helper[PROP_LABEL] == "Damage")
     asset = next(helper for helper in helpers if helper[PROP_LABEL] == "Asset")
 
@@ -173,6 +183,14 @@ ex:area-in-document a spot:DocumentAppearance ;
     # The point space rides along with its parent area rather than orphaning.
     assert point.parent == area
     print("Document appearance precedence test passed")
+
+
+def appearance_translation(text: str, appearance: str) -> tuple[float, ...]:
+    """The translation of an exported appearance, to three decimals."""
+    block = text.split(f"ex:{appearance} a ", 1)[1].split(" .\n", 1)[0]
+    literal = block.split('gom:hasTransformationMatrix "[', 1)[1].split("]", 1)[0]
+    values = [float(value) for value in literal.split(",")]
+    return tuple(round(value, 3) for value in values[12:15])
 
 
 def test_plans_keep_their_files() -> None:
@@ -199,8 +217,16 @@ ex:asset a spot:AssetSpace ;
 
 ex:sheet a spot:DocumentSpace ;
     rdfs:label "Sheet" ;
-    spot-sg:hasBoundingBox "[0,-6380,0,14382,0,0]"^^spot-sg:boundingBoxArray ;
     dcat:accessURL "..\\\\Plans\\\\002.pdf" .
+
+ex:detail a spot:AreaSpace ;
+    rdfs:label "Detail" ;
+    spot-sg:hasBoundingBox "[-50,-50,0,50,50,0]"^^spot-sg:boundingBoxArray ;
+    spot:hasAppearance ex:detail-in-sheet .
+
+ex:detail-in-sheet a spot:DocumentAppearance ;
+    spot:appearsIn ex:sheet ;
+    gom:hasTransformationMatrix "[1,0,0,0,0,1,0,0,0,0,1,0,300,-400,0,1]"^^gom:columnMajorArray .
 
 ex:view a spot:VerticalAreaSpace ;
     rdfs:label "Section" ;
@@ -228,7 +254,22 @@ ex:view-in-sheet a spot:DocumentAppearance ;
 
     assert "ex:sheet a spot:DocumentSpace" in text, text
     assert "qudt:hasUnit unit:PIXEL" in text
-    assert '"[0,-6380,0,14382,0,0]"^^spot-sg:boundingBoxArray' in text, text
+    # A sheet without a size is laid out as a 1 x 1 plane, 1000 x 1000 px.
+    assert '"[0,-1000,0,1000,0,0]"^^spot-sg:boundingBoxArray' in text, text
+    # A view only on the sheet stays there, measured like the sheet.
+    assert "ex:appearance_detail_in_sheet a spot:DocumentAppearance" in text
+    assert appearance_translation(text, "appearance_detail_in_sheet") == (
+        300.0, -400.0, 0.0
+    )
+    assert '"[-50,-50,0,50,50,0]"^^spot-sg:boundingBoxArray' in text
+    # A view in the building is laid out on the sheet through its proxy.
+    assert (
+        "ex:view spot:hasAppearance "
+        "ex:appearance_view_in_sheet_via_view-on-sheet ."
+    ) in text, text
+    assert appearance_translation(
+        text, "appearance_view_in_sheet_via_view-on-sheet"
+    ) == (100.0, -200.0, 0.0)
     assert "ex:sheet dcat:distribution ex:distribution_sheet ." in text
     assert "dcat:accessURL </assets/plans/002.pdf>" in text
     assert 'dcat:mediaType "application/pdf"' in text

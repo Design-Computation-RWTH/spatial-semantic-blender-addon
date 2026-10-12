@@ -34,6 +34,7 @@ from .spot_blender_common import (
     BOT_CLASS_SPACE,
     BOT_CLASS_STOREY,
     BROT_NAMESPACE,
+    DEFAULT_DOCUMENT_AXIS_DIRECTIONS,
     HELPER_COLLECTION_NAME,
     LENGTH_UNIT_METER,
     LENGTH_UNIT_PIXEL,
@@ -41,6 +42,8 @@ from .spot_blender_common import (
     PROP_LABEL,
     PROP_REPRESENTS_LINKS,
     PROP_URI_SUFFIX,
+    PROXY_ROLE_DOCUMENT,
+    PROXY_ROLE_PHYSICAL,
     ROLE_BUILDING,
     ROLE_DOCUMENT,
     ROLE_ELEMENT,
@@ -138,6 +141,13 @@ class ImportedSpace:
     # The file of a photograph, a document or an extracted view, as the
     # input links it.
     asset_path: str | None = None
+    # A space placed in the building and laid out on a sheet is two helpers,
+    # paired by the shared key; the document one names its space here.
+    proxy_role: str | None = None
+    shared_entity_key: str | None = None
+    proxy_of: str | None = None
+    # Whether the input gave the unit with qudt:hasUnit.
+    unit_stated: bool = True
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
     parent_iri: str | None = None
     children: list[str] = field(default_factory=list)
@@ -707,6 +717,13 @@ def apply_spot_am_placements(
         if directions:
             directions_by_space[space_iri] = directions
 
+    for space_iri, space in spaces.items():
+        if space.spot_class == SPOT_CLASS_DOCUMENT_SPACE:
+            directions_by_space[space_iri] = {
+                **DEFAULT_DOCUMENT_AXIS_DIRECTIONS,
+                **directions_by_space.get(space_iri, {}),
+            }
+
     if anchor is not None:
         for space_iri, space in spaces.items():
             if not space.anchored:
@@ -1087,6 +1104,7 @@ def parse_scene_graph_turtle(
                 represented_iris=split_turtle_object_list(
                     predicates.get("spot:represents", "")
                 ),
+                unit_stated="qudt:hasUnit" in predicates,
             )
             for axis_name, axis_predicate in (
                 ("X", "spot:hasXAxis"),
@@ -1202,57 +1220,16 @@ def parse_scene_graph_turtle(
             )
         )
 
-    document_only_spaces = {
-        space_id
-        for space_id, priority in chosen_priorities.items()
-        if priority <= 0
-    }
-    if document_only_spaces:
-        warning_messages.append(
-            f"Dropped {len(document_only_spaces)} spaces that are only placed on a "
-            "document sheet"
-        )
-
-    # A DocumentSpace stays as a root of its own, as this add-on exports a
-    # sheet, so its file is kept. What is laid out on it is not: a space
-    # placed elsewhere keeps only that placement.
-    sheet_placed_elsewhere = {
-        source_iri
-        for appearance_id, source_iri in appearance_sources.items()
-        if appearance_priority(appearance_types.get(appearance_id)) <= 0
-        and source_iri not in document_only_spaces
-    }
-    if sheet_placed_elsewhere:
-        warning_messages.append(
-            f"Kept only the building placement of {len(sheet_placed_elsewhere)} "
-            "spaces that are also laid out on a document sheet"
-        )
-
-    # A space whose only placement was on a sheet takes its descendants with it:
-    # they were positioned relative to it and have nowhere else to go.
-    dropped_spaces = set(document_only_spaces)
-    pending = list(dropped_spaces)
-    while pending:
-        dropped_id = pending.pop()
-        for space_id, space in spaces.items():
-            if space.parent_iri == dropped_id and space_id not in dropped_spaces:
-                dropped_spaces.add(space_id)
-                pending.append(space_id)
-
-    orphaned_count = len(dropped_spaces) - len(document_only_spaces)
-    if orphaned_count:
-        warning_messages.append(
-            f"Dropped {orphaned_count} spaces that were only placed below "
-            "document-sheet content"
-        )
-
-    for space_id in dropped_spaces:
-        spaces.pop(space_id, None)
-
-    if not spaces:
-        raise RuntimeError(
-            "No SPOT spaces remained after dropping document-only content."
-        )
+    lay_out_sheets(
+        spaces,
+        appearance_sources,
+        appearance_targets,
+        appearance_types,
+        appearance_matrices,
+        chosen_appearances,
+        space_axes,
+        warning_messages,
+    )
 
     root_ids = [
         space_id for space_id, space in spaces.items() if space.parent_iri is None
@@ -1267,6 +1244,7 @@ def parse_scene_graph_turtle(
         anchored_space.anchored = True
         anchored_space.local_bbox = list(anchor.local_bbox)
 
+    sheets = mirror_sheets(spaces)
     apply_spot_am_placements(
         spaces,
         chosen_appearances,
@@ -1276,6 +1254,7 @@ def parse_scene_graph_turtle(
         anchor,
         warning_messages,
     )
+    unmirror_sheets(spaces, sheets)
 
     for space_id, space in spaces.items():
         if space.parent_iri is None:
@@ -1295,6 +1274,122 @@ def parse_scene_graph_turtle(
             spaces[space_id].order,
         ),
     )
+
+
+# A sheet whose size the input does not give is laid out as a 1 x 1 plane,
+# 1000 x 1000 pixels at the document scale. Its Y axis points down the page.
+DEFAULT_SHEET_BBOX = [0.0, -1000.0, 0.0, 1000.0, 0.0, 0.0]
+# Blender units between the sheets laid out next to the building.
+SHEET_SPACING = 2.0
+
+
+def lay_out_sheets(
+    spaces: dict[str, ImportedSpace],
+    appearance_sources: dict[str, str],
+    appearance_targets: dict[str, str],
+    appearance_types: dict[str, str],
+    appearance_matrices: dict[str, Matrix],
+    chosen_appearances: dict[str, str],
+    space_axes: dict[str, dict[str, str]],
+    warning_messages: list[str],
+) -> None:
+    """
+    Keep each DocumentSpace as a sheet and what is laid out on it.
+
+    A space placed only on a sheet already hangs below it. A space placed in
+    the building as well becomes a pair, as the scene builder makes for a
+    plan: the physical helper stays where it is, and a document proxy lays
+    it out on the sheet, so the export writes both appearances.
+    """
+    for space in spaces.values():
+        if space.spot_class == SPOT_CLASS_DOCUMENT_SPACE and space.local_bbox is None:
+            space.local_bbox = list(DEFAULT_SHEET_BBOX)
+    for space in spaces.values():
+        # What is only laid out on a sheet is measured like the sheet.
+        parent = spaces.get(space.parent_iri) if space.parent_iri else None
+        if (
+            parent is not None
+            and parent.spot_class == SPOT_CLASS_DOCUMENT_SPACE
+            and not space.unit_stated
+        ):
+            space.length_unit = parent.length_unit
+
+    further_sheets: set[str] = set()
+    for appearance_id, source_iri in list(appearance_sources.items()):
+        if appearance_priority(appearance_types.get(appearance_id)) > 0:
+            continue
+        if chosen_appearances.get(source_iri) == appearance_id:
+            continue
+        sheet = spaces[appearance_targets[appearance_id]]
+        if sheet.spot_class != SPOT_CLASS_DOCUMENT_SPACE:
+            continue
+        source = spaces[source_iri]
+        if source.proxy_role is not None:
+            # One document proxy pairs with one physical helper.
+            further_sheets.add(source.local_name)
+            continue
+        source.proxy_role = PROXY_ROLE_PHYSICAL
+        source.shared_entity_key = source.local_name
+        proxy_iri = f"{source_iri} on {sheet.iri}"
+        spaces[proxy_iri] = ImportedSpace(
+            iri=proxy_iri,
+            local_name=f"{source.local_name}_on_{sheet.local_name}",
+            spot_class=source.spot_class,
+            label=source.label,
+            local_bbox=None,
+            order=source.order,
+            length_unit=LENGTH_UNIT_PIXEL,
+            proxy_role=PROXY_ROLE_DOCUMENT,
+            shared_entity_key=source.local_name,
+            proxy_of=source_iri,
+            parent_iri=sheet.iri,
+            local_matrix=appearance_matrices.get(appearance_id, Matrix.Identity(4)),
+            chosen_appearance=appearance_id,
+            chosen_appearance_type=appearance_types.get(appearance_id),
+        )
+        chosen_appearances[proxy_iri] = appearance_id
+        if source_iri in space_axes:
+            space_axes[proxy_iri] = space_axes[source_iri]
+
+    if further_sheets:
+        warning_messages.append(
+            f"{len(further_sheets)} spaces are laid out on more than one sheet; "
+            "only the first is kept: " + ", ".join(sorted(further_sheets))
+        )
+
+
+def mirror_sheets(spaces: dict[str, ImportedSpace]) -> dict[str, list[float]]:
+    """
+    Turn each sheet's box into page coordinates, Y down the page.
+
+    A sheet is drawn with the top edge of the page at y = 0 and the page
+    below it, as the scene builder lays out a plan, while its Y axis points
+    down the page. SPOT-AM relations such as containedInTop are resolved in
+    page coordinates; `unmirror_sheets` turns the result back. Returns each
+    sheet's drawn box.
+    """
+    drawn: dict[str, list[float]] = {}
+    for space_iri, space in spaces.items():
+        if space.spot_class != SPOT_CLASS_DOCUMENT_SPACE or space.local_bbox is None:
+            continue
+        drawn[space_iri] = list(space.local_bbox)
+        x0, y0, z0, x1, y1, z1 = space.local_bbox
+        space.local_bbox = [x0, -y1, z0, x1, -y0, z1]
+    return drawn
+
+
+def unmirror_sheets(
+    spaces: dict[str, ImportedSpace],
+    drawn: dict[str, list[float]],
+) -> None:
+    """Restore the drawn sheets and mirror the regions derived on them."""
+    for space_iri, bbox in drawn.items():
+        spaces[space_iri].local_bbox = bbox
+    for space in spaces.values():
+        if space.parent_iri in drawn and space.approximate_region:
+            translation = space.local_matrix.translation.copy()
+            translation.y = -translation.y
+            space.local_matrix = Matrix.Translation(translation)
 
 
 def parse_url_object(value: str) -> str:
@@ -1434,24 +1529,37 @@ def build_imported_scene_spec(
         parent_world_matrix: Matrix | None,
         parent_role: str | None,
         depth: int,
+        parent_length_unit: str | None = None,
     ) -> SpaceNodeSpec:
         space = spaces[space_id]
         role = infer_role(space, parent_role)
         local_matrix = (
-            space.local_matrix
+            space.local_matrix.copy()
             if parent_world_matrix is not None
             else Matrix.Identity(4)
         )
+        # A sheet and what is laid out on it are stated in pixels and drawn
+        # at the document scale; the export divides by it again. A pixel
+        # space in the building carries its scale in its matrix instead.
+        on_sheet = parent_length_unit in (None, LENGTH_UNIT_PIXEL)
+        if parent_length_unit == LENGTH_UNIT_PIXEL:
+            local_matrix.translation = local_matrix.translation * (
+                blender_units_per_length_unit(LENGTH_UNIT_PIXEL)
+            )
         world_matrix = (
             parent_world_matrix @ local_matrix
             if parent_world_matrix is not None
             else (root_world_matrix or Matrix.Identity(4)).copy()
         )
         local_bbox = space.local_bbox
-        if local_bbox is not None and parent_world_matrix is None:
-            # A root is drawn in Blender units; the export divides a sheet's
-            # box by the same scale to give its pixels back.
-            scale = blender_units_per_length_unit(space.length_unit)
+        if local_bbox is not None and on_sheet:
+            # A region SPOT-AM derived is stated in its parent's units.
+            unit = (
+                parent_length_unit
+                if space.approximate_region and parent_length_unit
+                else space.length_unit
+            )
+            scale = blender_units_per_length_unit(unit)
             local_bbox = [value * scale for value in local_bbox]
         if local_bbox is not None:
             world_bbox = local_bbox_to_world_bbox(local_bbox, world_matrix)
@@ -1488,12 +1596,18 @@ def build_imported_scene_spec(
             source_asset_path=space.asset_path,
             own_asset=space.asset_path is not None,
             local_bbox=list(local_bbox) if local_bbox is not None else None,
+            proxy_role=space.proxy_role,
+            shared_entity_key=space.shared_entity_key,
             sort_key=f"{depth:03d}:{space.order:05d}:{slugify(space.label)}",
             source_name=space.local_name,
             approximate_region=space.approximate_region,
         )
         for child_id in space.children:
-            node.children.append(build_node(child_id, world_matrix, role, depth + 1))
+            node.children.append(
+                build_node(
+                    child_id, world_matrix, role, depth + 1, space.length_unit
+                )
+            )
         return node
 
     return build_node(root_id, None, None, 0)
@@ -1579,6 +1693,7 @@ def import_scene_graph_turtle(
                 f"Replaced {replaced} helpers left by an earlier import"
             )
 
+    sheet_index = 0
     for root_id in root_ids:
         if spaces[root_id].anchored:
             anchor_world_matrix = frame_without_scale(anchor_helper.matrix_world)
@@ -1597,7 +1712,18 @@ def import_scene_graph_turtle(
             root_helper_names.append(anchor_helper.name)
             root_labels.append(str(anchor_helper.get(PROP_LABEL, anchor_helper.name)))
             continue
-        root_spec = build_imported_scene_spec(spaces, root_id)
+        root_world_matrix = None
+        if spaces[root_id].spot_class == SPOT_CLASS_DOCUMENT_SPACE:
+            # Sheets lie side by side next to the origin, so they do not
+            # cover the building or each other. Roots carry no exported
+            # placement, so this only affects the view in Blender.
+            root_world_matrix = Matrix.Translation(
+                Vector((SHEET_SPACING * (1 + sheet_index), 0.0, 0.0))
+            )
+            sheet_index += 1
+        root_spec = build_imported_scene_spec(
+            spaces, root_id, root_world_matrix=root_world_matrix
+        )
         instantiate_helpers(helper_collection, root_spec)
         root_helper_names.append(root_spec.helper_name)
         root_labels.append(root_spec.label)

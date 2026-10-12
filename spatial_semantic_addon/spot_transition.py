@@ -151,8 +151,12 @@ def record_import_metadata(
     fresh transition log.
     """
     prefixes, base = turtle_prefixes(text)
+    # A document proxy only lays its space out on a sheet; the space itself
+    # is the physical helper.
     imported_suffixes = {
-        space.local_name: space for space in spaces.values() if not space.anchored
+        space.local_name: space
+        for space in spaces.values()
+        if not space.anchored and getattr(space, "proxy_of", None) is None
     }
     helpers: list[tuple[bpy.types.Object, object]] = [
         (obj, imported_suffixes[str(obj.get("spot_uri_suffix"))])

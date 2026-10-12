@@ -1352,16 +1352,10 @@ def build_imported_scene_spec(
                 min_corner=origin.copy(),
                 max_corner=origin.copy(),
             )
+        # Only the graph names a referent's class. A class guessed from the
+        # position in the tree would turn every leaf of a bridge into a
+        # `bot:Element`.
         bot_class = space.bot_class
-        if bot_class is None:
-            bot_class = {
-                ROLE_SITE: BOT_CLASS_SITE,
-                ROLE_BUILDING: BOT_CLASS_BUILDING,
-                ROLE_STOREY: BOT_CLASS_STOREY,
-                # No `bot:Space` by position: a space is a room only when the
-                # graph says so.
-                ROLE_ELEMENT: BOT_CLASS_ELEMENT,
-            }.get(role)
         node = SpaceNodeSpec(
             role=role,
             spot_class=space.spot_class,

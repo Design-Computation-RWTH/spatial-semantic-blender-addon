@@ -246,6 +246,7 @@ The folder import uses the same current-state rules as the Graph Gateway. It mer
 
 The importer recreates the SPOT helper wireframes and hierarchy for checking. It uses the first `rdfs:label` when present. Otherwise, it uses the Turtle local name of the resource. When a space has multiple bounding boxes, the importer uses their enclosing axis-aligned bounding box. Multiple labels or bounding boxes produce import warnings. The importer does not recreate the original source meshes.
 If a space has no exported bounding box, the importer uses a tiny placeholder wireframe only for Blender visualization and keeps the missing bbox metadata implicit.
+The importer takes BOT and BEO classes only from the `rdf:type` of the referent that a space `spot:represents`. It does not guess a class from the position of a space in the tree. If the graph gives no class, the helper gets no class.
 
 #### Import into an existing AssetSpace
 

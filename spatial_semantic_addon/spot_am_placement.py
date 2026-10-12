@@ -85,6 +85,9 @@ class BoundaryPointMapping:
     # A plain spot-am:BoundaryPoint: the space has no extent along this axis,
     # as a section has none across its plane, so both ends are one point.
     flattens_axis: bool = False
+    # The parent axis the point's own axis lies along, from the appearance's
+    # axis mapping. A relation that constrains another axis contradicts it.
+    source_axis: str | None = None
 
 
 @dataclass
@@ -569,11 +572,19 @@ def space_depth(space_iri: str | None, spaces: dict[str, SpotAmSpace]) -> int:
     return depth
 
 
+def local_name(iri: str) -> str:
+    for separator in ("#", "/", ":"):
+        if separator in iri:
+            iri = iri.rsplit(separator, 1)[-1]
+    return iri.strip("<>")
+
+
 def solve_sibling_group(
     parent_iri: str | None,
     group: list[str],
     spaces: dict[str, SpotAmSpace],
     mappings_by_space: dict[str, list[BoundaryPointMapping]],
+    conflicts: set[str] | None = None,
 ) -> dict[str, SpotAmPlacement]:
     """Place the spaces of one parent that SPOT-AM locates, in one pass.
 
@@ -584,12 +595,41 @@ def solve_sibling_group(
     members = set(group)
     solver = EndpointSolver()
     constrained_axes: dict[str, set[str]] = {space_iri: set() for space_iri in group}
+    parent_bbox = (
+        extent_in_reference_frame(parent_iri, parent_iri, spaces, world_matrices)
+        if parent_iri is not None
+        else None
+    )
 
     for space_iri in group:
         for mapping in mappings_by_space[space_iri]:
             frame = resolve_directional_frame(mapping.target_iri, spaces)
             axis_name = relation_axis_name(mapping.relation_name, frame)
             if axis_name is None:
+                continue
+            if mapping.source_axis is not None and mapping.source_axis != axis_name:
+                # The point lies on one axis, the relation places it on another.
+                # Trusting the relation would turn a horizontal section into a
+                # vertical one, so it is dropped; a plane keeps its flatness
+                # in the middle of its parent.
+                if conflicts is not None:
+                    conflicts.add(
+                        f"{local_name(space_iri)}: {mapping.relation_name} constrains "
+                        f"{axis_name}, but its boundary point lies along "
+                        f"{mapping.source_axis}"
+                    )
+                if mapping.flattens_axis and parent_bbox is not None:
+                    index = axis_index(mapping.source_axis)
+                    middle = (parent_bbox[index] + parent_bbox[index + 3]) / 2.0
+                    keys = [
+                        (space_iri, mapping.source_axis, LOWER_END),
+                        (space_iri, mapping.source_axis, UPPER_END),
+                    ]
+                    solver.union(*keys)
+                    solver.add_interval(
+                        keys[0], AxisInterval(mapping.source_axis, middle, middle)
+                    )
+                    constrained_axes[space_iri].add(mapping.source_axis)
                 continue
             if mapping.source_end is not None and mapping.source_end[0] == axis_name:
                 ends = (mapping.source_end[1],)
@@ -694,6 +734,7 @@ def placement_signature(
 def derive_spot_am_placements(
     spaces: dict[str, SpotAmSpace],
     mappings_by_space: dict[str, list[BoundaryPointMapping]],
+    conflicts: set[str] | None = None,
 ) -> dict[str, SpotAmPlacement]:
     """Work out the region each approximately located space occupies.
 
@@ -717,7 +758,9 @@ def derive_spot_am_placements(
         group = groups[parent_iri]
         group_placements: dict[str, SpotAmPlacement] = {}
         for _ in range(len(group) + 1):
-            solved = solve_sibling_group(parent_iri, group, working, mappings_by_space)
+            solved = solve_sibling_group(
+                parent_iri, group, working, mappings_by_space, conflicts
+            )
             for space_iri, placement in solved.items():
                 working[space_iri].local_bbox = placement.centered_local_bbox()
                 working[space_iri].local_matrix = Matrix.Translation(

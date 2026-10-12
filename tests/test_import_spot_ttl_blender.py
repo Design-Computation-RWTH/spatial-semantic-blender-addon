@@ -535,6 +535,68 @@ ex:Detail_BPM_Z a spot-am:BoundaryPointMapping ;
     print("SPOT-AM spans inside an existing AssetSpace test passed")
 
 
+def test_relation_contradicting_its_axis_mapping_is_dropped() -> None:
+    """A horizontal section whose height is stated as a transverse position.
+
+    Its axis mapping lays its Z axis along the bridge's Z, but the relation of
+    its Z point names the transverse centre. Believing the relation would turn
+    the section into a vertical plane, so the relation is dropped and the
+    section stays horizontal, at the middle of the bridge's height.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    turtle = """\
+@prefix ex: <http://example.org/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix reloc: <https://w3id.org/reloc#> .
+@prefix spot: <https://w3id.org/spot#> .
+@prefix spot-am: <https://w3id.org/spot/am#> .
+@prefix spot-sg: <https://w3id.org/spot/sg#> .
+
+ex:Bridge a spot:AssetSpace ;
+    rdfs:label "Bridge" ;
+    spot-sg:hasBoundingBox "[0,0,0,90,10,20]"^^spot-sg:boundingBoxArray ;
+    spot:hasXAxis ex:Bridge_X ; spot:hasYAxis ex:Bridge_Y ; spot:hasZAxis ex:Bridge_Z .
+ex:Bridge_X a spot:Axis ; spot:hasDirection spot:Rear .
+ex:Bridge_Y a spot:Axis ; spot:hasDirection spot:Left .
+ex:Bridge_Z a spot:Axis ; spot:hasDirection spot:Top .
+
+ex:Section a spot:AreaSpace ;
+    rdfs:label "Section" ;
+    spot:hasAppearance ex:Section_in_Bridge ;
+    spot:hasZAxis ex:Section_Z .
+ex:Section_Z a spot:Axis ; spot-am:hasBoundaryPoint ex:Section_Z_BP .
+ex:Section_Z_BP a spot-am:BoundaryPoint .
+ex:Section_in_Bridge a spot:AssetAppearance ;
+    spot:appearsIn ex:Bridge ;
+    spot-am:hasAxisMapping ex:Section_AM_Z ;
+    spot-am:hasBoundaryPointMapping ex:Section_BPM_Z .
+ex:Section_AM_Z a spot-am:AxisMapping ;
+    spot-am:hasAxisRelationType spot-am:Antiparallel ;
+    spot-am:hasSourceAxis ex:Section_Z ;
+    spot-am:hasTargetAxis ex:Bridge_Z .
+ex:Section_BPM_Z a spot-am:BoundaryPointMapping ;
+    reloc:containedInTransversalCenter ex:Bridge ;
+    spot-am:hasSourcePoint ex:Section_Z_BP .
+"""
+    with tempfile.TemporaryDirectory(prefix="spot-am-conflict-") as directory:
+        input_path = Path(directory) / "conflict.ttl"
+        input_path.write_text(turtle, encoding="utf8")
+        result = import_scene_graph_turtle(input_path)
+
+    section = next(
+        obj
+        for obj in bpy.data.objects
+        if obj.get(PROP_HELPER) and obj[PROP_LABEL] == "Section"
+    )
+    corners = [section.matrix_world @ Vector(corner) for corner in section.bound_box]
+    ys = sorted({round(corner.y, 3) for corner in corners})
+    zs = sorted({round(corner.z, 3) for corner in corners})
+    assert ys == [0.0, 10.0], ys
+    assert zs == [10.0], zs
+    assert any("contradicts its axis mapping" in w for w in result["warnings"])
+    print("Contradicting SPOT-AM relation test passed")
+
+
 if __name__ == "__main__":
     main()
     test_document_appearances_do_not_win()
@@ -542,3 +604,4 @@ if __name__ == "__main__":
     test_spot_am_relation_to_other_space()
     test_dataset_folder_imports_live_spatial_mutations()
     test_spot_am_spans_inside_existing_asset_space()
+    test_relation_contradicting_its_axis_mapping_is_dropped()

@@ -636,6 +636,18 @@ def boundary_point_end(
     return axis_name, LOWER_END if is_min != flipped else UPPER_END
 
 
+def boundary_point_axis(
+    point_iri: str,
+    am: SpotAmStatements,
+    carried: dict[str, tuple[str, bool]],
+) -> str | None:
+    """The parent axis an axis mapping carries the point's own axis onto."""
+    axis_iri = am.point_axes.get(point_iri)
+    if axis_iri is None or axis_iri not in carried:
+        return None
+    return carried[axis_iri][0]
+
+
 def apply_spot_am_placements(
     spaces: dict[str, ImportedSpace],
     chosen_appearances: dict[str, str],
@@ -724,6 +736,11 @@ def apply_spot_am_placements(
                     am.boundary_point_mappings[mapping_id].source_point_iri
                 ]
                 is None,
+                source_axis=boundary_point_axis(
+                    am.boundary_point_mappings[mapping_id].source_point_iri,
+                    am,
+                    carried,
+                ),
             )
             for mapping_id in mapping_ids
             if mapping_id in am.boundary_point_mappings
@@ -736,7 +753,12 @@ def apply_spot_am_placements(
     if not mappings_by_space:
         return
 
-    placements = derive_spot_am_placements(am_spaces, mappings_by_space)
+    conflicts: set[str] = set()
+    placements = derive_spot_am_placements(am_spaces, mappings_by_space, conflicts)
+    for conflict in sorted(conflicts):
+        warning_messages.append(
+            f"Ignored a SPOT-AM relation that contradicts its axis mapping: {conflict}"
+        )
     for space_iri, placement in placements.items():
         space = spaces[space_iri]
         space.local_matrix = Matrix.Translation(Vector(placement.center))

@@ -10,6 +10,11 @@ from urllib.parse import quote, urlparse
 
 import bpy
 
+from .stated_am import (
+    appearance_predicates as stated_am_predicates,
+    mapping_blocks as stated_am_blocks,
+    stated_am,
+)
 from .bcf_authoring import (
     PROP_OBSERVED_DAMAGES,
     helper_for_exported_reference,
@@ -991,6 +996,7 @@ def export_space_block(
     precision: int,
     include_bbox: bool,
     document_backed_helper_names: set[str],
+    axis_helper_names: set[str] = frozenset(),
 ) -> str:
     label_literal = quote_turtle_string(helper_display_label(helper))
     length_unit = helper_length_unit(helper, document_backed_helper_names)
@@ -1022,7 +1028,12 @@ def export_space_block(
             predicates.append(
                 f"spot-sg:hasBoundingBox {quote_turtle_string(bbox_literal)}^^spot-sg:boundingBoxArray",
             )
-    if is_asset_space(helper) or is_document_space(helper) or helper_am_enabled(helper):
+    if (
+        is_asset_space(helper)
+        or is_document_space(helper)
+        or helper_am_enabled(helper)
+        or helper.name in axis_helper_names
+    ):
         space_suffix = export_suffixes[helper.name]
         for axis_name, predicate in SPACE_AXIS_DEFINITIONS:
             predicates.append(
@@ -1188,11 +1199,13 @@ def export_ifc_model_document_appearance_block(
 def export_space_axis_blocks(
     helper: bpy.types.Object,
     export_suffixes: dict[str, str],
+    axis_helper_names: set[str] = frozenset(),
 ) -> str:
     if (
         not is_asset_space(helper)
         and not is_document_space(helper)
         and not helper_am_enabled(helper)
+        and helper.name not in axis_helper_names
     ):
         return ""
 
@@ -1464,6 +1477,65 @@ def export_dot_block(
     )
 
 
+def stated_am_sources(
+    ordered_helpers: list[bpy.types.Object],
+    proxy_pairings: list[tuple[bpy.types.Object, bpy.types.Object]],
+) -> set[str]:
+    """The helpers whose space a stated SPOT-AM placement locates."""
+    sources = {helper.name for helper in ordered_helpers if stated_am(helper)}
+    sources.update(
+        physical.name
+        for physical, document in proxy_pairings
+        if stated_am(document)
+    )
+    return sources
+
+
+def stated_am_target_suffix(local_name: str, export_suffixes: dict[str, str]) -> str:
+    """The exported space an imported SPOT-AM relation points at."""
+    for helper_name, suffix in export_suffixes.items():
+        helper = bpy.data.objects.get(helper_name)
+        if (
+            helper is not None
+            and str(helper.get(PROP_URI_SUFFIX, "")) == local_name
+            and not is_document_proxy(helper)
+        ):
+            return suffix
+    raise RuntimeError(
+        f"A stated SPOT-AM relation points at '{local_name}', which is not "
+        "part of the exported helper scene"
+    )
+
+
+def stated_am_parts(
+    app_id: str,
+    source: bpy.types.Object,
+    carrier: bpy.types.Object,
+    target: bpy.types.Object,
+    export_suffixes: dict[str, str],
+) -> tuple[list[str], str]:
+    """
+    The appearance predicates and the blocks of the SPOT-AM placement that
+    `carrier` keeps for `source` in `target`, or nothing.
+    """
+    description = stated_am(carrier)
+    if description is None:
+        return [], ""
+    return (
+        stated_am_predicates(app_id, description, LOCAL_TERM_MARKER),
+        stated_am_blocks(
+            app_id,
+            description,
+            export_suffixes[source.name],
+            helper_display_label(source),
+            export_suffixes[target.name],
+            lambda local_name: stated_am_target_suffix(local_name, export_suffixes),
+            LOCAL_TERM_MARKER,
+            turtle_block,
+        ),
+    )
+
+
 def export_appearance_block(
     helper: bpy.types.Object,
     export_suffixes: dict[str, str],
@@ -1477,7 +1549,12 @@ def export_appearance_block(
         f"a spot:{appearance_class(parent)}",
         f"spot:appearsIn {LOCAL_TERM_MARKER}{export_suffixes[parent.name]}",
     ]
-    if include_transform and not helper_am_enabled(helper):
+    # A placement the input states with SPOT-AM alone is written as stated.
+    stated_predicates, stated_blocks = stated_am_parts(
+        app_id, helper, helper, parent, export_suffixes
+    )
+    predicates.extend(stated_predicates)
+    if include_transform and not helper_am_enabled(helper) and not stated_predicates:
         matrix_literal = exported_matrix_literal(
             helper,
             parent,
@@ -1513,6 +1590,7 @@ def export_appearance_block(
             f"spot:hasAppearance {LOCAL_TERM_MARKER}{app_id} .",
             "",
             turtle_block(f"{LOCAL_TERM_MARKER}{app_id}", predicates),
+            *(["", stated_blocks] if stated_blocks else []),
         ],
     )
 
@@ -1539,7 +1617,11 @@ def export_document_proxy_appearance_block(
         "a spot:DocumentAppearance",
         f"spot:appearsIn {LOCAL_TERM_MARKER}{export_suffixes[document_parent.name]}",
     ]
-    if include_transform:
+    stated_predicates, stated_blocks = stated_am_parts(
+        app_id, physical_helper, document_helper, document_parent, export_suffixes
+    )
+    predicates.extend(stated_predicates)
+    if include_transform and not stated_predicates:
         matrix_literal = exported_matrix_literal(
             document_helper,
             document_parent,
@@ -1556,6 +1638,7 @@ def export_document_proxy_appearance_block(
             f"spot:hasAppearance {LOCAL_TERM_MARKER}{app_id} .",
             "",
             turtle_block(f"{LOCAL_TERM_MARKER}{app_id}", predicates),
+            *(["", stated_blocks] if stated_blocks else []),
         ],
     )
 
@@ -1712,7 +1795,10 @@ def write_turtle(
     include_beo = any(helper.get(PROP_BEO_CLASS) for helper in exported_helpers)
     include_brot = any(helper.get(PROP_BROT_CLASS) for helper in exported_helpers)
     include_bot = any(helper.get(PROP_BOT_CLASS) for helper in exported_helpers)
-    include_am = any(helper_am_enabled(helper) for helper in exported_helpers)
+    axis_helper_names = stated_am_sources(ordered_helpers, proxy_pairings)
+    include_am = bool(axis_helper_names) or any(
+        helper_am_enabled(helper) for helper in exported_helpers
+    )
     include_dot = any(helper_dot_class(helper) for helper in exported_helpers)
     include_picture_observations = any(
         perspective_picture_camera(helper) is not None
@@ -1778,10 +1864,13 @@ def write_turtle(
                 precision,
                 include_bbox=include_bbox,
                 document_backed_helper_names=document_backed_helper_names,
+                axis_helper_names=axis_helper_names,
             )
         )
         lines.append("")
-        axis_blocks = export_space_axis_blocks(helper, export_suffixes)
+        axis_blocks = export_space_axis_blocks(
+            helper, export_suffixes, axis_helper_names
+        )
         if axis_blocks:
             lines.append(axis_blocks)
             lines.append("")

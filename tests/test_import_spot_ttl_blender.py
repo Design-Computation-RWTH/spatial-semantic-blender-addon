@@ -278,6 +278,128 @@ ex:view-in-sheet a spot:DocumentAppearance ;
     print("Plans keep their files test passed")
 
 
+SHEET_AM_TURTLE = """\
+@prefix ex: <https://example.org/scene/> .
+@prefix spot: <https://w3id.org/spot#> .
+@prefix spot-am: <https://w3id.org/spot/am#> .
+@prefix spot-sg: <https://w3id.org/spot/sg#> .
+@prefix gom: <https://w3id.org/gom#> .
+@prefix reloc: <https://w3id.org/reloc#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:asset a spot:AssetSpace ;
+    rdfs:label "Asset" ;
+    spot-sg:hasBoundingBox "[0,0,0,10,10,10]"^^spot-sg:boundingBoxArray .
+
+ex:sheet a spot:DocumentSpace ;
+    rdfs:label "Sheet" ;
+    spot:hasXAxis ex:sheet_X ;
+    spot:hasYAxis ex:sheet_Y .
+ex:sheet_X a spot:Axis ; spot:hasDirection spot:Right .
+ex:sheet_Y a spot:Axis ; spot:hasDirection spot:Bottom .
+
+ex:view a spot:AreaSpace ;
+    rdfs:label "View" ;
+    spot:hasXAxis ex:view_X ;
+    spot:hasYAxis ex:view_Y ;
+    spot:hasAppearance ex:view-in-asset, ex:view-in-sheet .
+ex:view_X a spot:Axis ; spot-am:hasBoundaryPoint ex:view_X_Min, ex:view_X_Max .
+ex:view_Y a spot:Axis ; spot-am:hasBoundaryPoint ex:view_Y_Min .
+ex:view_X_Min a spot-am:MinBoundaryPoint .
+ex:view_X_Max a spot-am:MaxBoundaryPoint .
+ex:view_Y_Min a spot-am:MinBoundaryPoint .
+
+ex:view-in-asset a spot:AssetAppearance ;
+    spot:appearsIn ex:asset ;
+    gom:hasTransformationMatrix "[1,0,0,0,0,1,0,0,0,0,1,0,1,2,3,1]"^^gom:columnMajorArray .
+
+ex:view-in-sheet a spot:DocumentAppearance ;
+    spot:appearsIn ex:sheet ;
+    spot-am:hasAxisMapping ex:view-in-sheet_X ;
+    spot-am:hasBoundaryPointMapping ex:view-in-sheet_X_Min, ex:view-in-sheet_X_Max,
+        ex:view-in-sheet_Y_Min .
+ex:view-in-sheet_X a spot-am:AxisMapping ;
+    spot-am:hasAccuracy spot-am:Exact ;
+    spot-am:hasAxisRelationType spot-am:Codirectional ;
+    spot-am:hasSourceAxis ex:view_X ;
+    spot-am:hasTargetAxis ex:sheet_X .
+ex:view-in-sheet_X_Min a spot-am:BoundaryPointMapping ;
+    reloc:containedInTransversalCenter ex:sheet ;
+    spot-am:hasAccuracy spot-am:Approximate ;
+    spot-am:hasSourcePoint ex:view_X_Min .
+ex:view-in-sheet_X_Max a spot-am:BoundaryPointMapping ;
+    reloc:containedInRight ex:sheet ;
+    spot-am:hasAccuracy spot-am:Broad ;
+    spot-am:hasSourcePoint ex:view_X_Max .
+ex:view-in-sheet_Y_Min a spot-am:BoundaryPointMapping ;
+    reloc:containedInTop ex:sheet ;
+    spot-am:hasAccuracy spot-am:Approximate ;
+    spot-am:hasSourcePoint ex:view_Y_Min .
+"""
+
+
+def stated_relations(text: str) -> list[tuple[str, str, str]]:
+    """The reloc relation, target and accuracy of each boundary point mapping."""
+    relations = []
+    for block in text.split("\n\n"):
+        if "a spot-am:BoundaryPointMapping" not in block:
+            continue
+        relation = block.split("reloc:", 1)[1].split(" ;", 1)[0]
+        accuracy = block.split("spot-am:hasAccuracy spot-am:", 1)[1].split(" ;", 1)[0]
+        name, target = relation.split(" ", 1)
+        relations.append((name, target, accuracy))
+    return sorted(relations)
+
+
+def test_sheet_placements_keep_their_spot_am() -> None:
+    """A placement on a sheet that SPOT-AM alone states is exported as stated.
+
+    The importer derives a region on the sheet to draw the view, but the
+    export writes the stated relations and accuracies again, not a matrix
+    taken from that region, and a second round trip writes the same.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    expected = sorted(
+        [
+            ("containedInRight", "ex:sheet", "Broad"),
+            ("containedInTop", "ex:sheet", "Approximate"),
+            ("containedInTransversalCenter", "ex:sheet", "Approximate"),
+        ]
+    )
+    with tempfile.TemporaryDirectory(prefix="spot-sheet-am-test-") as directory:
+        input_path = Path(directory) / "sheet-am.ttl"
+        input_path.write_text(SHEET_AM_TURTLE, encoding="utf8")
+        import_scene_graph_turtle(input_path)
+        helpers = {
+            (str(obj[PROP_LABEL]), obj.get("spot_proxy_role")): obj
+            for obj in bpy.data.objects
+            if obj.get(PROP_HELPER)
+        }
+        proxy = helpers[("View", "document")]
+        sheet = helpers[("Sheet", None)]
+        # Drawn in the right part of the 1 x 1 sheet, near its top.
+        local = sheet.matrix_world.inverted() @ proxy.matrix_world.translation
+        assert local.x > 0.5 and local.y > -0.5, local
+
+        first = Path(directory) / "first.ttl"
+        export_helper_scene(output_path=first, asset_base_url="/assets")
+        text = first.read_text(encoding="utf8")
+        appearance = text.split(
+            "ex:appearance_view_in_sheet_via_view-on-sheet a spot:DocumentAppearance", 1
+        )[1].split(" .\n", 1)[0]
+        assert "gom:hasTransformationMatrix" not in appearance, appearance
+        assert "spot-am:hasAxisMapping" in appearance
+        assert stated_relations(text) == expected, stated_relations(text)
+        assert "ex:view_x_max_boundary_point a spot-am:MaxBoundaryPoint" in text
+        assert "spot-am:hasTargetAxis ex:sheet_x_axis" in text
+
+        import_scene_graph_turtle(first)
+        second = Path(directory) / "second.ttl"
+        export_helper_scene(output_path=second, asset_base_url="/assets")
+        assert stated_relations(second.read_text(encoding="utf8")) == expected
+    print("Sheet placements keep their SPOT-AM test passed")
+
+
 def test_spot_am_fuzzy_placement() -> None:
     """A damage located only by SPOT-AM boundary relations.
 
@@ -720,6 +842,7 @@ if __name__ == "__main__":
     main()
     test_document_appearances_do_not_win()
     test_plans_keep_their_files()
+    test_sheet_placements_keep_their_spot_am()
     test_spot_am_fuzzy_placement()
     test_spot_am_relation_to_other_space()
     test_dataset_folder_imports_live_spatial_mutations()

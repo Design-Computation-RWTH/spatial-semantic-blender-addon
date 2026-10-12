@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -148,6 +149,9 @@ class ImportedSpace:
     proxy_of: str | None = None
     # Whether the input gave the unit with qudt:hasUnit.
     unit_stated: bool = True
+    # The SPOT-AM placement of the space on a sheet, as the input states it
+    # (see `stated_am`), when no matrix places it there.
+    stated_am: dict | None = None
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
     parent_iri: str | None = None
     children: list[str] = field(default_factory=list)
@@ -193,6 +197,8 @@ class SpotAmStatements:
     # Mapping IRI to (source axis, target axis, whether they are antiparallel).
     axis_mappings: dict[str, tuple[str, str, bool]] = field(default_factory=dict)
     axis_directions: dict[str, str] = field(default_factory=dict)
+    # Mapping IRI to its spot-am:hasAccuracy, such as "Approximate".
+    accuracies: dict[str, str] = field(default_factory=dict)
 
 
 def parse_args() -> argparse.Namespace:
@@ -995,6 +1001,7 @@ def parse_scene_graph_turtle(
             source_points = split_turtle_object_list(
                 predicates.get("spot-am:hasSourcePoint", "")
             )
+            record_accuracy(am, subject, predicates)
             if relation is not None and source_points:
                 targets = split_turtle_object_list(predicates[relation])
                 if targets:
@@ -1015,6 +1022,7 @@ def parse_scene_graph_turtle(
             relation_types = split_turtle_object_list(
                 predicates.get("spot-am:hasAxisRelationType", "")
             )
+            record_accuracy(am, subject, predicates)
             if source_axes and target_axes:
                 am.axis_mappings[subject] = (
                     source_axes[0],
@@ -1265,6 +1273,7 @@ def parse_scene_graph_turtle(
         space.children.sort(key=lambda child_id: spaces[child_id].order)
     assign_represented_referents(spaces, bot_types, beo_types, brot_types)
     resolve_asset_paths(spaces, media_urls, media_links)
+    describe_stated_am(spaces, space_axes, appearance_matrices, am)
 
     # The building comes first: the result names it as the root.
     return spaces, sorted(
@@ -1390,6 +1399,77 @@ def unmirror_sheets(
             translation = space.local_matrix.translation.copy()
             translation.y = -translation.y
             space.local_matrix = Matrix.Translation(translation)
+
+
+def record_accuracy(am: SpotAmStatements, subject: str, predicates: dict[str, str]) -> None:
+    accuracies = split_turtle_object_list(predicates.get("spot-am:hasAccuracy", ""))
+    if accuracies:
+        am.accuracies[subject] = parse_prefixed_local_name(accuracies[0])
+
+
+def describe_stated_am(
+    spaces: dict[str, ImportedSpace],
+    space_axes: dict[str, dict[str, str]],
+    appearance_matrices: dict[str, Matrix],
+    am: SpotAmStatements,
+) -> None:
+    """
+    Keep the SPOT-AM description of each placement on a sheet.
+
+    Only a placement SPOT-AM alone states is kept: a matrix states it more
+    precisely and is written as before. See `stated_am` for the format.
+    """
+    axis_names = {
+        axis_iri: axis_name
+        for axes in space_axes.values()
+        for axis_name, axis_iri in axes.items()
+    }
+    for space in spaces.values():
+        appearance_id = space.chosen_appearance
+        parent = spaces.get(space.parent_iri) if space.parent_iri else None
+        if (
+            appearance_id is None
+            or parent is None
+            or parent.spot_class != SPOT_CLASS_DOCUMENT_SPACE
+        ):
+            continue
+        matrix = appearance_matrices.get(appearance_id)
+        if matrix is not None and matrix != Matrix.Identity(4):
+            continue
+        axes = []
+        for mapping_id in am.appearance_axis_mappings.get(appearance_id, []):
+            if mapping_id not in am.axis_mappings:
+                continue
+            source_axis, target_axis, antiparallel = am.axis_mappings[mapping_id]
+            if source_axis not in axis_names or target_axis not in axis_names:
+                continue
+            axes.append(
+                {
+                    "source": axis_names[source_axis],
+                    "target": axis_names[target_axis],
+                    "relation": "Antiparallel" if antiparallel else "Codirectional",
+                    "accuracy": am.accuracies.get(mapping_id, "Exact"),
+                }
+            )
+        points = []
+        for mapping_id in am.appearance_boundary_mappings.get(appearance_id, []):
+            mapping = am.boundary_point_mappings.get(mapping_id)
+            if mapping is None or mapping.target_iri not in spaces:
+                continue
+            point_axis = am.point_axes.get(mapping.source_point_iri)
+            if point_axis not in axis_names:
+                continue
+            points.append(
+                {
+                    "axis": axis_names[point_axis],
+                    "kind": am.boundary_point_kinds.get(mapping.source_point_iri),
+                    "relation": mapping.relation_name,
+                    "target": spaces[mapping.target_iri].local_name,
+                    "accuracy": am.accuracies.get(mapping_id, "Exact"),
+                }
+            )
+        if axes or points:
+            space.stated_am = {"axes": axes, "points": points}
 
 
 def parse_url_object(value: str) -> str:
@@ -1598,6 +1678,11 @@ def build_imported_scene_spec(
             local_bbox=list(local_bbox) if local_bbox is not None else None,
             proxy_role=space.proxy_role,
             shared_entity_key=space.shared_entity_key,
+            stated_am=(
+                json.dumps(space.stated_am, ensure_ascii=False)
+                if space.stated_am is not None
+                else None
+            ),
             sort_key=f"{depth:03d}:{space.order:05d}:{slugify(space.label)}",
             source_name=space.local_name,
             approximate_region=space.approximate_region,

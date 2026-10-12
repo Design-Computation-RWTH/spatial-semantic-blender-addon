@@ -120,6 +120,9 @@ PROP_SOURCE_ASSET_PATH = "spot_source_asset_path"
 # extracted view can be. Such a space owns its file, see
 # `asset_filename_for_helper`, unlike a path guessed from a name.
 PROP_OWN_ASSET = "spot_own_asset"
+# JSON: the SPOT-AM placement an imported graph states for the helper's
+# appearance, written again by the export (see `stated_am`).
+PROP_STATED_AM = "spot_stated_am"
 # Set on an IFC bounding box: the `IfcProject/...` collection it stands for.
 PROP_IFC_BOUNDING_BOX_SOURCE = "spot_ifc_bounding_box_source"
 # Set on an IFC bounding box: the file name of the IFC model in the assets,
@@ -428,6 +431,8 @@ class SpaceNodeSpec:
     # say this; an imported pair states it here.
     proxy_role: str | None = None
     shared_entity_key: str | None = None
+    # JSON of a SPOT-AM placement the input states, see `stated_am`.
+    stated_am: str | None = None
     plan_kind: str | None = None
     # A point space located only approximately by SPOT-AM is drawn as the
     # region it may occupy rather than as a point marker.
@@ -2162,6 +2167,8 @@ def create_helper_object(
     if spec.proxy_role is not None:
         helper[PROP_PROXY_ROLE] = spec.proxy_role
         helper[PROP_SHARED_ENTITY_KEY] = spec.shared_entity_key
+    if spec.stated_am is not None:
+        helper[PROP_STATED_AM] = spec.stated_am
     if spec.source_collections:
         helper[PROP_SOURCE_COLLECTIONS] = json.dumps(
             spec.source_collections, ensure_ascii=True

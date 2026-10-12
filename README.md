@@ -270,7 +270,7 @@ What is laid out on a sheet comes with it:
 - A space that is only on a sheet becomes a child of the sheet. If the graph gives no unit, the space is measured like the sheet.
 - A space that is in the building and on a sheet becomes a pair, as the scene builder makes for a plan. The physical helper stays in the building. A document proxy, named `<space>_on_<sheet>`, lays it out on the sheet. The export writes a `spot:DocumentAppearance` of the space in the sheet from the proxy, next to its building appearance. A space laid out on more than one sheet keeps only the first, and the importer warns about it.
 - A sheet placement with SPOT-AM relations gets the region the relations give on the sheet, as in the building. The importer resolves the relations in page coordinates, with Y down the page, and draws the result with the top edge of the page at y = 0.
-- The export states a sheet placement with a matrix, as for every imported SPOT-AM placement. It does not write the SPOT-AM relations again.
+- If SPOT-AM alone places a space on a sheet, with no matrix, the export writes that SPOT-AM description again and no matrix. The description keeps the axis mappings, the `reloc:` relations, their targets, and their accuracies as the input states them. The space gets its axes and boundary points. The region drawn in Blender does not change the export: if you move such a helper, the export still writes the stated SPOT-AM.
 
 #### Import into an existing AssetSpace
 

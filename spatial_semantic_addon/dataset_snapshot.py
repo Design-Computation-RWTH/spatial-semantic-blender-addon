@@ -16,6 +16,7 @@ from .export_spot_ttl import (
     export_helper_scene,
 )
 from .export_spatial_history import export_spatial_history
+from .spot_transition import write_snapshot_mutations
 from .spot_blender_common import (
     HELPER_COLLECTION_NAME,
     PROP_HELPER,
@@ -111,8 +112,9 @@ def export_dataset_snapshot(
     spatial_history_start: str = "2025-01-01T09:00:00Z",
     project_name: str = "",
 ) -> dict[str, object]:
-    """Atomically publish scene RDF and any explicitly authored BCF fixture
-    into `exports/<project>/<timestamp>/`."""
+    """Atomically publish scene RDF, any explicitly authored BCF fixture and
+    the committed SPOT-AM to SPOT-SG transitions into
+    `exports/<project>/<timestamp>/`."""
     if bpy.data.collections.get(helper_collection_name) is None:
         raise RuntimeError(f"Helper collection '{helper_collection_name}' was not found")
     project = project_slug(project_name, helper_collection_name)
@@ -128,7 +130,7 @@ def export_dataset_snapshot(
         rdf_dir.mkdir(parents=True)
 
         scene_path = rdf_dir / "scene.ttl"
-        export_helper_scene(
+        scene_result = export_helper_scene(
             helper_collection_name=helper_collection_name,
             output_path=scene_path,
             base_iri=base_iri,
@@ -143,6 +145,11 @@ def export_dataset_snapshot(
             base_iri=base_iri,
             local_prefix=local_prefix,
             precision=precision,
+        )
+        transition_result = write_snapshot_mutations(
+            rdf_dir / "mutations.trig",
+            helper_root_objects(bpy.data.collections[helper_collection_name]),
+            str(scene_result["base_iri"]),
         )
         spatial_history_result = None
         if simulate_spatial_history:
@@ -163,6 +170,7 @@ def export_dataset_snapshot(
             "project": project,
             "timestamp": captured.isoformat(),
             "bcf_issue_count": bcf_result["issue_count"] if bcf_result else 0,
+            "transition_activity_count": transition_result["activity_count"],
             "spatial_history_activity_count": (
                 spatial_history_result["activity_count"]
                 if spatial_history_result

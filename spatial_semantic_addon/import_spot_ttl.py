@@ -1815,7 +1815,6 @@ def import_scene_graph_turtle(
         helper_collection,
         anchor_helper,
         text,
-        resolved_input,
     )
 
     helper_count = len(

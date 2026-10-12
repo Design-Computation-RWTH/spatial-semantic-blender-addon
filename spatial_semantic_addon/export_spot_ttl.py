@@ -2107,6 +2107,7 @@ def export_helper_scene(
     return {
         "output_path": str(resolved_output_path),
         "export_profile": export_profile,
+        "base_iri": base_iri,
         "local_prefix": normalize_local_prefix(local_prefix),
         "helper_collection_name": collection.name,
         "helper_count": helper_count,

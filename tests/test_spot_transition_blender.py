@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -17,12 +16,10 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 import spatial_semantic_addon
+from spatial_semantic_addon.dataset_snapshot import export_dataset_snapshot
 from spatial_semantic_addon.import_spot_ttl import import_scene_graph_turtle
 from spatial_semantic_addon.spot_blender_common import PROP_HELPER, PROP_LABEL
-from spatial_semantic_addon.spot_transition import (
-    commit_sg_placements,
-    write_transition_dataset,
-)
+from spatial_semantic_addon.spot_transition import commit_sg_placements
 from test_import_spot_ttl_blender import bridge_fixture, world_x_range
 
 
@@ -45,9 +42,10 @@ def test_spans_move_from_spot_am_to_spot_sg() -> None:
 
     SPOT-AM splits the 90 m bridge into three 30 m spans. The face between
     spans 1 and 2 really lies at 40 m, so both are committed as SPOT-SG, then
-    span 2 is raised by 1 m and committed again. The written dataset keeps the
-    input and logs both activities. Read back, spans 1 and 2 stand where they
-    were placed, and span 3, still SPOT-AM, fills the rest of the bridge.
+    span 2 is raised by 1 m and committed again. The dataset snapshot states
+    the spans as imported, under its Base IRI, and logs both activities. Read
+    back, spans 1 and 2 stand where they were placed, and span 3, still
+    SPOT-AM, fills the rest of the bridge.
     """
     bpy.ops.wm.read_factory_settings(use_empty=True)
     spatial_semantic_addon.register()
@@ -99,60 +97,58 @@ def test_spans_move_from_spot_am_to_spot_sg() -> None:
             ended_at=datetime(2026, 10, 11, 10, 0, tzinfo=timezone.utc),
         )
 
-        output = Path(directory) / "transition-dataset"
-        result = write_transition_dataset(output)
-        # The bridge's frame is stated by an activity of its own, first.
-        assert result["activity_count"] == 3
-        assert (output / "rdf" / "scene.ttl").read_text(encoding="utf8") == turtle
+        result = export_dataset_snapshot(
+            exports_root=Path(directory) / "exports",
+            project_name="Nibelungen Bridge",
+        )
+        output = Path(result["output_path"])
+        assert output.parent == (Path(directory) / "exports" / "nibelungen-bridge").resolve()
+        # The model's own box states the frame, so no activity states it.
+        assert result["transition_activity_count"] == 2
+        scene_text = (output / "rdf" / "scene.ttl").read_text(encoding="utf8")
+        assert "@prefix ex: <http://localhost:4000/scene/> ." in scene_text
+        # The scene states a committed span as imported: its SPOT-AM placement.
+        assert "ex:span-1 spot:hasAppearance ex:appearance_span-1_in_model ." in scene_text
+        span_1_appearance = scene_text.split(
+            "ex:appearance_span-1_in_model a spot:AssetAppearance", 1
+        )[1].split(" .\n", 1)[0]
+        assert "spot-am:hasBoundaryPointMapping" in span_1_appearance
+        assert "gom:hasTransformationMatrix" not in span_1_appearance
         log = (output / "rdf" / "mutations.trig").read_text(encoding="utf8")
 
-        frame_delta = entry(log, "#!lbcf-entry delta 0")
-        assert "<http://example.org/Bridge> spot-sg:hasBoundingBox" in frame_delta
-        assert "Frame of Bridge stated" in frame_delta
-        assert "#!lbcf-entry retraction 0" not in log
-
-        first_retraction = entry(log, "#!lbcf-entry retraction 1")
+        first_retraction = entry(log, "#!lbcf-entry retraction 0")
         assert (
-            "<http://example.org/Span_1> spot:hasAppearance "
-            "<http://example.org/Span_1_in_Bridge> ." in first_retraction
+            "<http://localhost:4000/scene/span-1> spot:hasAppearance "
+            "<http://localhost:4000/scene/appearance_span-1_in_model> ." in first_retraction
         )
-        first_delta = entry(log, "#!lbcf-entry delta 1")
+        first_delta = entry(log, "#!lbcf-entry delta 0")
+        assert (
+            "<http://localhost:4000/scene/span-1> spot:hasAppearance "
+            "<http://localhost:4000/scene/appearance_span-1_in_model_sg> ." in first_delta
+        )
         assert "spot-sg:hasBoundingBox \"[0," not in first_delta
+        # A source the user named keeps its IRI.
         assert "prov:used <http://example.org/plan>" in first_delta
         # Each SPOT-AM link is invalidated, and its SPOT-SG link revises it.
         assert first_delta.count("prov:wasInvalidatedBy") == 2
         assert first_delta.count("prov:wasRevisionOf") == 2
+        assert "example.org/Span" not in log
 
         # The correction revises the matrix only; the unchanged box keeps its
         # reifier and is neither retracted nor asserted again.
-        second_retraction = entry(log, "#!lbcf-entry retraction 2")
+        second_retraction = entry(log, "#!lbcf-entry retraction 1")
         assert "gom:hasTransformationMatrix" in second_retraction
         assert "spot-sg:hasBoundingBox" not in second_retraction
-        second_delta = entry(log, "#!lbcf-entry delta 2")
+        second_delta = entry(log, "#!lbcf-entry delta 1")
         assert second_delta.count("prov:wasInvalidatedBy") == 1
         assert second_delta.count("prov:wasRevisionOf") == 1
-        assert "<http://example.org/agent/Architect>" in second_delta
-
-        # Without a folder, the dataset becomes a snapshot of its project.
-        exports = Path(directory) / "exports"
-        previous_root = os.environ.get("SPATIAL_SEMANTIC_DATASETS_DIR")
-        os.environ["SPATIAL_SEMANTIC_DATASETS_DIR"] = directory
-        try:
-            snapshot = write_transition_dataset(project_name="Nibelungen Bridge")
-        finally:
-            if previous_root is None:
-                os.environ.pop("SPATIAL_SEMANTIC_DATASETS_DIR", None)
-            else:
-                os.environ["SPATIAL_SEMANTIC_DATASETS_DIR"] = previous_root
-        snapshot_dir = Path(snapshot["output_dir"])
-        assert snapshot_dir.parent == (exports / "nibelungen-bridge").resolve()
-        assert (snapshot_dir / "rdf" / "mutations.trig").read_text(encoding="utf8") == log
+        assert "<http://localhost:4000/scene/agent/Architect>" in second_delta
 
         bpy.ops.wm.read_factory_settings(use_empty=True)
         spatial_semantic_addon.register()
         import_scene_graph_turtle(output)
 
-    # The bridge now states its own box, so no anchor is needed to read it.
+    # The snapshot states the model's box, so no anchor is needed to read it.
     assert world_x_range(helper("Span_1")) == (0.0, 40.0)
     assert world_x_range(helper("Span_2")) == (40.0, 60.0)
     assert world_x_range(helper("Span_3")) == (60.0, 90.0)

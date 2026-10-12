@@ -65,7 +65,6 @@ from .spot_transition import (
     commit_sg_placements,
     is_placed_by_spot_am,
     read_log,
-    write_transition_dataset,
 )
 from .dataset_snapshot import export_dataset_snapshot
 from .topology_setup import (
@@ -1202,6 +1201,27 @@ def import_anchor_from_context(
     return True, anchor
 
 
+def report_commits_outside_turtle(
+    operator: bpy.types.Operator,
+    context: bpy.types.Context,
+) -> None:
+    """Warn that a single Turtle file leaves the committed placements out."""
+    count = sum(
+        1
+        for obj in context.scene.objects
+        if obj.get(PROP_HELPER) and PROP_SG_STATE in obj and obj.parent is not None
+    )
+    if count:
+        operator.report(
+            {"WARNING"},
+            (
+                f"{count} spaces have committed SPOT-SG placements; this file "
+                "states them as imported, by SPOT-AM. Use Export Dataset Snapshot "
+                "to write the commits as provenance next to the scene"
+            ),
+        )
+
+
 def operator_error_message(error: Exception) -> str:
     """
     A message that still says something once Blender shows it in the status bar.
@@ -1591,43 +1611,6 @@ class SPOT_OT_commit_sg_placement(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class SPOT_OT_export_transition_dataset(bpy.types.Operator):
-    bl_idname = "spot.export_transition_dataset"
-    bl_label = "SPOT: Export Transition Dataset"
-    bl_description = (
-        "Write the imported input as a dataset snapshot in datasets/exports/<project>/ "
-        "whose mutation log holds the committed SPOT-SG placements and their provenance"
-    )
-    bl_options = {"REGISTER"}
-
-    directory: StringProperty(
-        name="Output Folder",
-        description="Folder to write into instead of a snapshot in datasets/exports",
-        subtype="DIR_PATH",
-        default="",
-    )
-
-    def execute(self, context: bpy.types.Context) -> set[str]:
-        settings = context.scene.spot_tools_settings
-        try:
-            result = write_transition_dataset(
-                self.directory or None,
-                project_name=settings.project_name,
-                helper_collection_name=settings.helper_collection,
-            )
-        except Exception as error:
-            self.report({"ERROR"}, operator_error_message(error))
-            return {"CANCELLED"}
-        self.report(
-            {"INFO"},
-            (
-                f"Wrote {result['activity_count']} activities with "
-                f"{result['change_count']} changes to {result['output_dir']}"
-            ),
-        )
-        return {"FINISHED"}
-
-
 class SPOT_OT_export_turtle_default(bpy.types.Operator):
     bl_idname = "spot.export_turtle_default"
     bl_label = "SPOT: Export Scene Graph Turtle"
@@ -1671,6 +1654,7 @@ class SPOT_OT_export_turtle_default(bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported scene graph Turtle to {result['output_path']}")
+        report_commits_outside_turtle(self, context)
         return {"FINISHED"}
 
 
@@ -1729,6 +1713,7 @@ class SPOT_OT_export_turtle_as(ExportHelper, bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported scene graph Turtle to {result['output_path']}")
+        report_commits_outside_turtle(self, context)
         return {"FINISHED"}
 
 
@@ -1775,9 +1760,11 @@ class SPOT_OT_export_dataset_snapshot(bpy.types.Operator):
             self.report({"ERROR"}, operator_error_message(error))
             return {"CANCELLED"}
 
+        transitions = result["transition_activity_count"]
         self.report(
             {"INFO"},
-            f"Exported RDF dataset snapshot to {result['output_path']}",
+            f"Exported RDF dataset snapshot to {result['output_path']}"
+            + (f" with {transitions} SPOT-SG activities" if transitions else ""),
         )
         return {"FINISHED"}
 
@@ -2391,9 +2378,8 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
             SPOT_OT_commit_sg_placement.bl_idname,
             text="Commit Selected as SPOT-SG",
         )
-        transition_box.operator(
-            SPOT_OT_export_transition_dataset.bl_idname,
-            text="Export Transition Dataset",
+        transition_box.label(
+            text="Export Dataset Snapshot writes them as provenance", icon="INFO"
         )
 
         bbox_box = layout.box()
@@ -3118,7 +3104,6 @@ CLASSES = (
     SPOT_OT_import_turtle_as,
     SPOT_OT_import_dataset_folder,
     SPOT_OT_commit_sg_placement,
-    SPOT_OT_export_transition_dataset,
     SPOT_OT_export_turtle_default,
     SPOT_OT_export_turtle_as,
     SPOT_OT_export_dataset_snapshot,

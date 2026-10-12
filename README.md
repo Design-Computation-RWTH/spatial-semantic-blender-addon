@@ -69,6 +69,10 @@ root AssetSpace. The action uses one UTC timestamp and
 writes deterministic scene RDF. Exports in the same second receive a numeric
 suffix.
 
+If you committed SPOT-AM placements as SPOT-SG, the snapshot also writes
+`rdf/mutations.trig` with those commits as provenance. See
+[Move spaces from SPOT-AM to SPOT-SG](#move-spaces-from-spot-am-to-spot-sg).
+
 The graph gateway loads the newest snapshot of any project by default. Use
 `npm start -- project <project>` in the demonstrator to load the newest
 snapshot of one project.
@@ -309,19 +313,24 @@ SPOT-AM locates a space qualitatively. Its derived region can be wrong without t
 3. Enter your name or IRI as `Agent` in the `SPOT-AM to SPOT-SG` box of the SPOT panel.
 4. Select the helpers and click `Commit Selected as SPOT-SG`. Give a label, and optionally the IRIs of the sources you used, such as a plan.
 5. Repeat for later corrections. A space committed again gets a revised matrix and box.
-6. Click `Export Transition Dataset`.
+6. Click `Export Dataset Snapshot`.
 
-The output is a snapshot in `<datasets>/exports/<project>/<timestamp>/`, like a dataset snapshot. `rdf/scene.ttl` (or the input folder's `rdf` files) holds the input unchanged. `rdf/mutations.trig` holds one entry pair per commit, in the graph gateway's `#!lbcf-entry` format, and follows the reification pattern with the current state asserted:
+The snapshot writes the scene and its commits:
+
+- `rdf/scene.ttl` holds the Blender scene under your Base IRI, as every snapshot does. It states a committed space as it was imported: with its stated SPOT-AM placement and the box the input gave.
+- `rdf/mutations.trig` holds one entry pair per commit, in the graph gateway's `#!lbcf-entry` format. Its IRIs are the snapshot's: each space, appearance, activity, reifier, and generated agent is named under your Base IRI. A source or an agent that you give as an IRI keeps that IRI.
+
+The log follows the reification pattern with the current state asserted:
 
 - The retraction removes the link from the space to its SPOT-AM appearance.
 - The delta asserts the link to a new SPOT-SG appearance with its matrix, the space's bounding box, and a `prov:Activity` with agent, time, and sources.
 - RDF 1.2 reifiers name every changed triple. The old link is `prov:wasInvalidatedBy` the activity; the new link is `prov:wasGeneratedBy` it and a `prov:wasRevisionOf` the old one.
 - The SPOT-AM appearance's own statements stay in the graph, as what SPOT-AM said.
-- The first commit also states the root's bounding box, because its matrices refer to the root's frame. The root's axis directions must match the ones the input states.
+- The matrices refer to the root's frame. The snapshot states the root's bounding box itself, so no activity states it. The root's axis directions must match the ones the input states.
 
-`Import Dataset Folder` replays the log, so it shows the current state: committed spaces at their SPOT-SG placement, and the rest resolved by SPOT-AM around them.
+`Import Dataset Folder` replays the log, so it shows the current state: committed spaces at their SPOT-SG placement, and the rest resolved by SPOT-AM around them. If the imported dataset folder had a log of its own, the import replays it, and the snapshot states the result. The snapshot does not repeat that earlier log.
 
-A plain `Export TTL` writes a placement that SPOT-AM alone states as stated, see the SPOT-AM rules above. It does not write the commits.
+A plain `Export TTL` writes one file without a log, so it states committed spaces as imported. It warns about this. Use `Export Dataset Snapshot` to keep the commits.
 
 ### IFC Bounding Box
 

@@ -13,18 +13,17 @@ activity and the new one a revision of it. The SPOT-AM appearance's own
 statements stay in the graph, as what SPOT-AM said. Placing a space again
 revises its matrix and box the same way.
 
-The result is written as a dataset folder: the imported input as the
-authored RDF and the transitions as entries in ``rdf/mutations.trig``, the
-log the graph gateway keeps. Importing that folder replays the log, so the
-importer, the gateway and the demonstrator all read the same current state.
+A dataset snapshot writes the transitions as entries in
+``rdf/mutations.trig``, the log the graph gateway keeps, next to the scene,
+which states each committed space as it was imported. Importing the
+snapshot replays the log, so the importer, the gateway and the demonstrator
+all read the same current state.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -56,8 +55,7 @@ PROP_IMPORT_AXIS_DIRECTIONS = "spot_import_axis_directions"
 # JSON: the SPOT-SG placement last committed for the helper (see SgState).
 PROP_SG_STATE = "spot_sg_state"
 
-# Scene properties: the imported input, and the committed activities.
-SCENE_BASELINE = "spot_transition_baseline"
+# Scene property: the committed activities.
 SCENE_LOG = "spot_transition_log"
 
 PREFIXES = {
@@ -71,7 +69,6 @@ PREFIXES = {
 }
 PREFIX_LINE = re.compile(r"^@prefix\s+([^:\s]*):\s*<([^>]*)>\s*\.\s*$")
 BASE_LINE = re.compile(r"^@base\s+<([^>]*)>\s*\.\s*$")
-ENTRY_LINE = re.compile(r"^#!lbcf-entry\s+(delta|retraction)\b", re.MULTILINE)
 PRECISION = 6
 
 
@@ -141,14 +138,12 @@ def record_import_metadata(
     helper_collection: bpy.types.Collection,
     anchor_helper: bpy.types.Object | None,
     text: str,
-    input_path: Path,
 ) -> None:
     """Remember what the imported input said, for a later transition.
 
     Each helper learns the IRI of its space. A helper SPOT-AM placed also
     learns the appearance that did so; the root learns its stated box and
-    axis directions. The scene learns the input, and a fresh import starts a
-    fresh transition log.
+    axis directions. A fresh import starts a fresh transition log.
     """
     prefixes, base = turtle_prefixes(text)
     # A document proxy only lays its space out on a sheet; the space itself
@@ -195,9 +190,7 @@ def record_import_metadata(
         if space.parent_iri is None:
             helper[PROP_IMPORT_AXIS_DIRECTIONS] = json.dumps(space.axis_directions)
 
-    scene = bpy.context.scene
-    scene[SCENE_BASELINE] = str(input_path)
-    scene[SCENE_LOG] = "[]"
+    bpy.context.scene[SCENE_LOG] = "[]"
 
 
 # --- Committing placements -------------------------------------------------
@@ -593,85 +586,107 @@ def activity_entries(record: dict, number: int) -> list[str]:
     return entries
 
 
-def baseline_rdf_files(baseline: Path) -> list[tuple[Path, str]]:
-    """The authored RDF files of the input, and where they go in the output."""
-    if baseline.is_file():
-        suffix = baseline.suffix if baseline.suffix in {".ttl", ".trig"} else ".ttl"
-        return [(baseline, f"scene{suffix}")]
-    rdf_dir = baseline / "rdf"
-    if not rdf_dir.is_dir():
-        raise RuntimeError(f"The dataset folder '{baseline}' has no rdf folder")
-    return [
-        (path, str(path.relative_to(rdf_dir)))
-        for path in sorted(rdf_dir.rglob("*"))
-        if path.is_file() and path.suffix in {".ttl", ".trig"}
-    ]
-
-
-def write_transition_dataset(
-    output_dir: str | Path | None = None,
-    project_name: str = "",
-    helper_collection_name: str = "SPOT Scene",
-) -> dict[str, object]:
-    """Write the imported input with the committed transitions replayed onto it.
-
-    The output is a new folder; the input is never changed. Without an
-    explicit folder it is a fresh snapshot in `exports/<project>/`, as the
-    dataset snapshot writes, so the graph gateway can select it by project.
-    An input dataset folder's own mutation log is kept and the transitions
-    are appended to it. A dump in the input is left out, as it would hide the
-    appended entries.
+def snapshot_log(
+    root_helpers: list[bpy.types.Object],
+    base_iri: str,
+) -> list[dict]:
     """
-    if output_dir is None:
-        from .dataset_snapshot import project_slug, project_snapshot_destination
+    The committed activities, stated in the IRIs a dataset snapshot gives.
 
-        project = project_slug(project_name, helper_collection_name)
-        destination, temporary, _timestamp = project_snapshot_destination(project)
-        try:
-            result = write_transition_dataset(temporary)
-            os.replace(temporary, destination)
-        except Exception:
-            shutil.rmtree(temporary, ignore_errors=True)
-            raise
-        return {**result, "output_dir": str(destination), "project": project}
+    A commit names the spaces as the imported input did. The snapshot names
+    them after the Blender scene, under its Base IRI, so each IRI is mapped:
+    a space to its exported space, its SPOT-AM appearance to the appearance
+    the snapshot writes for it, and its SPOT-SG appearance, the activities,
+    reifiers and generated agents into the Base IRI. Sources and agents the
+    user named stay as they are. A box stated for the root's frame is left
+    out: the snapshot states the root's box itself.
+    """
+    from .export_spot_ttl import (
+        appearance_subject_id,
+        build_export_resource_registry,
+        resolve_appearance_target_helper,
+    )
 
-    scene = bpy.context.scene
-    baseline_value = scene.get(SCENE_BASELINE)
-    if not baseline_value:
-        raise RuntimeError("Import a dataset first; there is no baseline to build on")
-    baseline = Path(str(baseline_value))
-    if not baseline.exists():
-        raise RuntimeError(f"The imported input '{baseline}' no longer exists")
-    log = read_log(scene)
+    log = read_log(bpy.context.scene)
     if not log:
-        raise RuntimeError("No SPOT-SG placements have been committed since the import")
-
-    output = Path(output_dir).expanduser().resolve()
-    if baseline.resolve() == output or output in baseline.resolve().parents:
-        raise RuntimeError("Write the transition dataset to a folder outside the input")
-    rdf_dir = output / "rdf"
-    rdf_dir.mkdir(parents=True, exist_ok=True)
-
-    existing_log = ""
-    for source, relative in baseline_rdf_files(baseline):
-        target = rdf_dir / relative
-        if relative == "mutations.trig":
-            existing_log = source.read_text(encoding="utf8")
+        return []
+    registry = build_export_resource_registry(root_helpers)
+    suffixes = registry.export_suffixes
+    iri_map: dict[str, str] = {}
+    for helper in registry.exported_helpers:
+        imported = helper.get(PROP_IMPORT_IRI)
+        if not imported:
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
+        iri_map[str(imported)] = f"{base_iri}{suffixes[helper.name]}"
+        if helper.parent is None or not helper.parent.get(PROP_HELPER):
+            continue
+        app_id = appearance_subject_id(
+            helper, resolve_appearance_target_helper(helper), suffixes
+        )
+        if PROP_AM_APPEARANCE_IRI in helper:
+            iri_map[str(helper[PROP_AM_APPEARANCE_IRI])] = f"{base_iri}{app_id}"
+        if PROP_SG_STATE in helper:
+            sg_appearance = json.loads(str(helper[PROP_SG_STATE])).get("appearance")
+            if sg_appearance:
+                iri_map[sg_appearance] = f"{base_iri}{app_id}_sg"
 
-    number = len(ENTRY_LINE.findall(existing_log))
-    entries: list[str] = []
+    kept_as_written = {"label", "agent_label", "ended_at", "used"}
+    translated: list[dict] = []
     for record in log:
-        entries.extend(activity_entries(record, number))
-        number += 1
-    log_text = existing_log.rstrip("\n")
-    log_text = (log_text + "\n\n" if log_text else "") + "\n\n".join(entries) + "\n"
-    (rdf_dir / "mutations.trig").write_text(log_text, encoding="utf8")
+        changes = [change for change in record["changes"] if change["kind"] != "root-box"]
+        if not changes:
+            continue
+        namespace = namespace_of(record["activity"])
 
+        def translate(value: object, key: str = "") -> object:
+            if key in kept_as_written:
+                return value
+            if isinstance(value, dict):
+                return {name: translate(item, name) for name, item in value.items()}
+            if isinstance(value, list):
+                return [translate(item) for item in value]
+            if not isinstance(value, str):
+                return value
+            if value in iri_map:
+                return iri_map[value]
+            if key == "space" or key == "parent":
+                raise RuntimeError(
+                    f"The committed space '{value}' is not part of the exported "
+                    "helper scene"
+                )
+            if value.startswith(namespace) and not value.startswith('"'):
+                return f"{base_iri}{value[len(namespace):]}"
+            return value
+
+        agent_named = ":" in record["agent_label"]
+        result = translate({**record, "changes": changes})
+        if agent_named:
+            result["agent"] = record["agent"]
+        translated.append(result)
+    return translated
+
+
+def write_snapshot_mutations(
+    output_path: Path,
+    root_helpers: list[bpy.types.Object],
+    base_iri: str,
+) -> dict[str, int]:
+    """
+    Write the committed SPOT-AM to SPOT-SG transitions as a mutation log.
+
+    The snapshot's scene states each committed space as it was imported;
+    replaying the log gives its current SPOT-SG placement, and the reifiers
+    record who placed it, when, and from what. Nothing is written when
+    nothing was committed.
+    """
+    log = snapshot_log(root_helpers, base_iri)
+    if not log:
+        return {"activity_count": 0, "change_count": 0}
+    entries: list[str] = []
+    for number, record in enumerate(log):
+        entries.extend(activity_entries(record, number))
+    output_path.write_text("\n\n".join(entries) + "\n", encoding="utf8")
     return {
-        "output_dir": str(output),
         "activity_count": len(log),
         "change_count": sum(len(record["changes"]) for record in log),
     }

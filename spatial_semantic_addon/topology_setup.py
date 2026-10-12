@@ -1,5 +1,6 @@
 """
-Set the BOT or BROT class of a helper's referent by hand.
+Set the BOT or BROT class of a helper's referent by hand, or make a
+PointSpace a photograph with a camera.
 
 An imported graph often leaves referents unclassed, and a Blender scene
 cannot say that a collection is a bridge superstructure. The SPOT Setup panel
@@ -30,9 +31,13 @@ from .spot_blender_common import (
     PROP_BROT_CLASS,
     PROP_DOT_CLASS,
     PROP_HELPER,
+    PROP_SOURCE_ASSET_PATH,
     PROP_SOURCE_COLLECTION,
     PROP_SOURCE_COLLECTIONS,
     PROP_SOURCE_NAME,
+    PROP_SPOT_CLASS,
+    SPOT_CLASS_POINT,
+    find_source_object_for_helper,
     represents_link_owner,
     split_name_and_tags,
 )
@@ -169,3 +174,94 @@ def set_helper_topology_class(
         if new_name != owner.name:
             rename_id(owner, new_name)
 
+
+def helper_camera(helper: bpy.types.Object) -> bpy.types.Object | None:
+    """The camera a PointSpace helper is, or that it was built from."""
+    if helper.type == "CAMERA":
+        return helper
+    source = find_source_object_for_helper(helper)
+    return source if source is not None and source.type == "CAMERA" else None
+
+
+def copy_registered_properties(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+) -> None:
+    """
+    Copy the add-on's registered `spot_*` properties, which `keys()` misses,
+    collections such as the represents links included.
+    """
+    for prop in source.bl_rna.properties:
+        name = prop.identifier
+        if not name.startswith("spot_") or not source.is_property_set(name):
+            continue
+        if prop.type == "COLLECTION":
+            items = getattr(target, name)
+            items.clear()
+            for item in getattr(source, name):
+                copy = items.add()
+                for field in item.bl_rna.properties:
+                    if (
+                        field.identifier != "rna_type"
+                        and not field.is_readonly
+                        and item.is_property_set(field.identifier)
+                    ):
+                        setattr(copy, field.identifier, getattr(item, field.identifier))
+        elif not prop.is_readonly:
+            setattr(target, name, getattr(source, name))
+
+
+def make_helper_camera(
+    helper: bpy.types.Object,
+    image_path: str | None = None,
+) -> bpy.types.Object:
+    """
+    Replace a PointSpace helper with a perspective camera that is the helper.
+
+    The export writes a `sosa:Observation` for a PointSpace that is, or was
+    built from, a perspective camera with an image. Blender cannot change
+    an object's type, so a camera takes the helper's place: its name, custom
+    properties, parent, transform, collections, and every reference to it.
+    A Blender camera looks along its -Z axis, the frame a camera's PointSpace
+    has when the scene is built. Returns the camera.
+    """
+    if helper.get(PROP_SPOT_CLASS) != SPOT_CLASS_POINT:
+        raise ValueError(f"'{helper.name}' is no PointSpace")
+    if image_path:
+        helper[PROP_SOURCE_ASSET_PATH] = image_path
+    if not helper.get(PROP_SOURCE_ASSET_PATH):
+        raise ValueError(f"'{helper.name}' has no image; choose one")
+
+    camera = helper_camera(helper)
+    if camera is not None:
+        camera.data.type = "PERSP"
+        return camera
+    existing = find_source_object_for_helper(helper)
+    if existing is not None:
+        raise ValueError(
+            f"'{helper.name}' was built from '{existing.name}', which is no camera"
+        )
+
+    name = helper.name
+    camera_data = bpy.data.cameras.new(name)
+    camera_data.type = "PERSP"
+    camera = bpy.data.objects.new(f"{name}.camera", camera_data)
+    for key in helper.keys():
+        camera[key] = helper[key]
+    copy_registered_properties(helper, camera)
+    # An imported helper names itself as its source; the camera is no source.
+    if PROP_SOURCE_NAME in camera:
+        del camera[PROP_SOURCE_NAME]
+    camera.parent = helper.parent
+    camera.matrix_parent_inverse = helper.matrix_parent_inverse.copy()
+    camera.matrix_basis = helper.matrix_basis.copy()
+    camera.hide_render = True
+
+    # Collections, children and references to the helper move to the camera.
+    helper.user_remap(camera)
+    old_data = helper.data
+    bpy.data.objects.remove(helper)
+    if isinstance(old_data, bpy.types.Mesh) and old_data.users == 0:
+        bpy.data.meshes.remove(old_data)
+    camera.name = name
+    return camera

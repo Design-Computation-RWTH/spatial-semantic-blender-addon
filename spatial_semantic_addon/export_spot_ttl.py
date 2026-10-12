@@ -705,11 +705,16 @@ def asset_url_for_helper(helper: bpy.types.Object, asset_base_url: str) -> str |
 def perspective_picture_camera(
     helper: bpy.types.Object,
 ) -> bpy.types.Object | None:
-    """Return the perspective source camera for an image-backed PointSpace."""
+    """
+    Return the perspective camera of an image-backed PointSpace: the helper
+    itself when the SPOT Setup panel made it a camera, else its source.
+    """
     if not is_point_space(helper) or asset_filename_for_helper(helper) is None:
         return None
 
-    source_object = find_source_object_for_helper(helper)
+    source_object = (
+        helper if helper.type == "CAMERA" else find_source_object_for_helper(helper)
+    )
     if source_object is None or source_object.type != "CAMERA":
         return None
 

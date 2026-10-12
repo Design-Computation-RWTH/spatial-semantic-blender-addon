@@ -124,6 +124,8 @@ class ImportedSpace:
     bot_class: str | None = None
     beo_class: str | None = None
     brot_class: str | None = None
+    # The image of a photograph's PointSpace, as the input links it.
+    asset_path: str | None = None
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
     parent_iri: str | None = None
     children: list[str] = field(default_factory=list)
@@ -837,6 +839,10 @@ def parse_scene_graph_turtle(
     bot_types: dict[str, str] = {}
     beo_types: dict[str, str] = {}
     brot_types: dict[str, str] = {}
+    # Image URLs and the links that lead to them: a distribution, or an
+    # observation's result. See `resolve_picture_asset_paths`.
+    media_urls: dict[str, str] = {}
+    media_links: dict[str, list[str]] = {}
     order = 0
     skipped_statements = 0
 
@@ -861,6 +867,17 @@ def parse_scene_graph_turtle(
                 predicates[predicate] += f", {object_value.strip()}"
             else:
                 predicates[predicate] = object_value.strip()
+
+        for predicate in ("dcat:accessURL", "dcat:downloadURL"):
+            if predicate in predicates and subject not in media_urls:
+                media_urls[subject] = parse_url_object(
+                    split_turtle_object_list(predicates[predicate])[0]
+                )
+        for predicate in ("dcat:distribution", "sosa:hasResult", "spot:represents"):
+            if predicate in predicates:
+                media_links.setdefault(subject, []).extend(
+                    split_turtle_object_list(predicates[predicate])
+                )
 
         linked_appearances = split_turtle_object_list(
             predicates.get("spot:hasAppearance", "")
@@ -1245,8 +1262,46 @@ def parse_scene_graph_turtle(
     for space in spaces.values():
         space.children.sort(key=lambda child_id: spaces[child_id].order)
     assign_represented_referents(spaces, bot_types, beo_types, brot_types)
+    resolve_picture_asset_paths(spaces, media_urls, media_links)
 
     return spaces, sorted(root_ids, key=lambda space_id: spaces[space_id].order)
+
+
+def parse_url_object(value: str) -> str:
+    """A URL written as an IRI or as a string literal, as some tools do."""
+    if value.startswith("<") and value.endswith(">"):
+        return value[1:-1]
+    if value.startswith('"'):
+        return unescape_turtle_string(value[: value.rindex('"') + 1])
+    return value
+
+
+def resolve_picture_asset_paths(
+    spaces: dict[str, ImportedSpace],
+    media_urls: dict[str, str],
+    media_links: dict[str, list[str]],
+) -> None:
+    """
+    Keep the image of each PointSpace so the space can become a camera.
+
+    The image is linked on the space itself, through its distribution, or,
+    as this add-on exports it, from the observation the space represents
+    through the observation's result and that result's distribution.
+    """
+    for space in spaces.values():
+        if space.spot_class != "PointSpace":
+            continue
+        pending = [space.iri]
+        seen: set[str] = set()
+        while pending:
+            node = pending.pop(0)
+            if node in seen:
+                continue
+            seen.add(node)
+            if node in media_urls:
+                space.asset_path = media_urls[node]
+                break
+            pending.extend(media_links.get(node, []))
 
 
 def assign_represented_referents(
@@ -1392,6 +1447,7 @@ def build_imported_scene_spec(
             world_matrix=world_matrix,
             length_unit=space.length_unit,
             beo_class=space.beo_class,
+            source_asset_path=space.asset_path,
             local_bbox=(
                 list(space.local_bbox) if space.local_bbox is not None else None
             ),

@@ -348,6 +348,18 @@ The export writes a hierarchy relation only if the parent and the child both hav
 
 BCF components can be BOT elements or BROT components, joints, and coatings.
 
+#### Set as Camera
+
+The export writes a `sosa:Observation` for a photograph only if its PointSpace is a perspective Blender camera, or was built from one. An imported PointSpace is a wireframe point. To make it a camera:
+
+1. Select one or more PointSpaces, or their helpers.
+2. Click `Set as Camera` in the `Photograph` box.
+3. If one PointSpace without an image is selected, choose the image file.
+
+The importer keeps the image of a PointSpace. It reads `dcat:accessURL` or `dcat:downloadURL` on the space, on its `dcat:distribution`, or on the result of the observation that the space represents. The image file name goes to `/assets/images/<name>`.
+
+A camera object replaces the helper in the `SPOT Scene` collection. It keeps the name, the properties, the parent, the transform, and all references of the helper. It looks along its local -Z axis, as a camera in a built scene does. To aim the camera, turn it. You can change the lens on the camera data. The camera holds the picture controls, such as damages and BCF issues.
+
 ### SPOT Test Panel
 
 The `SPOT Test` panel is a Blender-side verification surface for the current helper scene.

@@ -68,7 +68,10 @@ def date_time_literal(value: datetime) -> str:
 
 def placement_change_owners(helper: bpy.types.Object) -> list[object]:
     owners: list[object] = []
-    source = find_source_object_for_helper(helper)
+    # A helper that is itself a camera holds its own flag.
+    source = (
+        helper if helper.type == "CAMERA" else find_source_object_for_helper(helper)
+    )
     if source is not None:
         owners.append(source)
     collection_name = helper.get(PROP_SOURCE_COLLECTION)

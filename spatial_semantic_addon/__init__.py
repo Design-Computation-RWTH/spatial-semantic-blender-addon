@@ -73,7 +73,9 @@ from .topology_setup import (
     BROT_SETUP_CLASSES,
     VOCABULARY_BOT,
     VOCABULARY_BROT,
+    helper_camera,
     helper_topology_label,
+    make_helper_camera,
     set_helper_topology_class,
 )
 from .export_spatial_history import (
@@ -117,6 +119,7 @@ from .spot_blender_common import (
     ROLE_SITE,
     SPOT_CLASS_ASSET,
     SPOT_CLASS_ENTITY,
+    SPOT_CLASS_POINT,
     Aabb,
     am_axis_accuracy_prop_name,
     am_axis_relation_prop_name,
@@ -2203,6 +2206,65 @@ class SPOT_OT_set_topology_class(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SPOT_OT_make_camera(bpy.types.Operator):
+    bl_idname = "spot.make_camera"
+    bl_label = "SPOT: Set as Camera"
+    bl_description = (
+        "Give each selected PointSpace a perspective camera, so it exports as "
+        "a photograph with a sosa:Observation"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    filepath: StringProperty(
+        name="Image",
+        description="The photograph; needed when the PointSpace has no image yet",
+        subtype="FILE_PATH",
+        options={"SKIP_SAVE"},
+    )
+    filter_image: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
+    filter_folder: BoolProperty(default=True, options={"HIDDEN", "SKIP_SAVE"})
+
+    def invoke(self, context: bpy.types.Context, event: bpy.types.Event) -> set[str]:
+        helpers = [
+            helper
+            for helper in selected_setup_helpers(context)
+            if helper.get(PROP_SPOT_CLASS) == SPOT_CLASS_POINT
+        ]
+        if len(helpers) == 1 and not helpers[0].get(PROP_SOURCE_ASSET_PATH):
+            context.window_manager.fileselect_add(self)
+            return {"RUNNING_MODAL"}
+        return self.execute(context)
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        helpers = [
+            helper
+            for helper in selected_setup_helpers(context)
+            if helper.get(PROP_SPOT_CLASS) == SPOT_CLASS_POINT
+        ]
+        if not helpers:
+            self.report({"ERROR"}, "Select one or more PointSpaces or their helpers")
+            return {"CANCELLED"}
+        image_path = (
+            Path(bpy.path.abspath(self.filepath)).name if self.filepath else None
+        )
+        made = 0
+        for helper in helpers:
+            was_active = context.view_layer.objects.active == helper
+            try:
+                camera = make_helper_camera(
+                    helper, image_path if len(helpers) == 1 else None
+                )
+            except ValueError as error:
+                self.report({"WARNING"}, str(error))
+                continue
+            camera.select_set(True)
+            if was_active:
+                context.view_layer.objects.active = camera
+            made += 1
+        self.report({"INFO"}, f"{made} PointSpace(s) are now cameras")
+        return {"FINISHED"} if made else {"CANCELLED"}
+
+
 class SPOT_OT_use_active_helper_for_test(bpy.types.Operator):
     bl_idname = "spot.use_active_helper_for_test"
     bl_label = "SPOT: Use Active Helper for Test"
@@ -2773,6 +2835,9 @@ class VIEW3D_PT_spot_setup(bpy.types.Panel):
             status.label(text=f"{helper_display_name(helpers[0])}")
             status.label(text=f"SPOT: {helpers[0].get(PROP_SPOT_CLASS, 'none')}")
             status.label(text=f"Represents: {helper_topology_label(helpers[0])}")
+            camera = helper_camera(helpers[0])
+            if camera is not None:
+                status.label(text=f"Camera: {camera.name}", icon="CAMERA_DATA")
             if len(helpers) > 1:
                 status.label(text=f"{len(helpers)} spaces selected")
 
@@ -2801,6 +2866,18 @@ class VIEW3D_PT_spot_setup(bpy.types.Panel):
         )
         clear.vocabulary = "NONE"
         clear.class_name = ""
+
+        camera_box = layout.box()
+        camera_box.label(text="Photograph")
+        camera_row = camera_box.row()
+        camera_row.enabled = any(
+            helper.get(PROP_SPOT_CLASS) == SPOT_CLASS_POINT for helper in helpers
+        )
+        camera_row.operator(
+            SPOT_OT_make_camera.bl_idname,
+            text="Set as Camera",
+            icon="CAMERA_DATA",
+        )
 
 
 class VIEW3D_PT_spot_test(bpy.types.Panel):
@@ -3075,6 +3152,7 @@ CLASSES = (
     SPOT_OT_project_asset_space_origin,
     SPOT_OT_set_asset_space_origin,
     SPOT_OT_set_topology_class,
+    SPOT_OT_make_camera,
     SPOT_OT_use_active_helper_for_test,
     SPOT_OT_write_test_report,
     VIEW3D_PT_spot_tools,

@@ -23,6 +23,7 @@ from spatial_semantic_addon.spot_blender_common import (
     PROP_BROT_CLASS,
     PROP_HELPER,
     PROP_LABEL,
+    PROP_SOURCE_ASSET_PATH,
     PROP_SOURCE_NAME,
     parse_name_semantics,
 )
@@ -42,6 +43,7 @@ BRIDGE_TURTLE = f"""\
 @prefix qudt: <http://qudt.org/schema/qudt/> .
 @prefix unit: <http://qudt.org/vocab/unit/> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dcat: <http://www.w3.org/ns/dcat#> .
 
 ex:asset a spot:AssetSpace ;
     rdfs:label "Bridge Asset" ;
@@ -91,6 +93,17 @@ ex:joint_in_deck a spot:EntityAppearance ;
     gom:fromCoordinateSystem ex:joint ;
     gom:hasTransformationMatrix {IDENTITY} ;
     spot:appearsIn ex:deck .
+
+ex:Camera_nb_detail a spot:PointSpace ;
+    rdfs:label "Camera_nb_detail" ;
+    qudt:hasUnit unit:M ;
+    dcat:accessURL "..\\\\InputPublic\\\\Pictures\\\\nb_detail.JPG" ;
+    spot:hasAppearance ex:camera_in_bridge .
+
+ex:camera_in_bridge a spot:EntityAppearance ;
+    gom:fromCoordinateSystem ex:Camera_nb_detail ;
+    gom:hasTransformationMatrix "[1,0,0,0,0,1,0,0,0,0,1,0,5,-20,3,1]"^^gom:columnMajorArray ;
+    spot:appearsIn ex:bridge .
 """
 
 
@@ -186,6 +199,49 @@ def test_clear_class() -> None:
     print("Clear class test passed")
 
 
+def test_set_as_camera(directory: Path) -> None:
+    helper = helpers_by_label()["Camera_nb_detail"]
+    assert helper[PROP_SOURCE_ASSET_PATH].endswith("nb_detail.JPG"), dict(helper)
+    name = helper.name
+    parent = helper.parent
+    world = helper.matrix_world.copy()
+    collections = {collection.name for collection in helper.users_collection}
+    bridge = helpers_by_label()["Bridge"]
+    link = bridge.spot_represents_links.add()
+    link.object = helper
+    bpy.ops.object.select_all(action="DESELECT")
+    helper.select_set(True)
+    bpy.context.view_layer.objects.active = helper
+    assert bpy.ops.spot.make_camera() == {"FINISHED"}
+
+    camera = bpy.data.objects[name]
+    assert camera.type == "CAMERA" and camera.data.type == "PERSP"
+    assert camera.get(PROP_HELPER) and camera[PROP_LABEL] == "Camera_nb_detail"
+    assert camera.parent == parent
+    assert (camera.matrix_world.translation - world.translation).length < 1e-6
+    assert {collection.name for collection in camera.users_collection} == collections
+    assert "SPOT Cameras" not in bpy.data.collections
+    assert bridge.spot_represents_links[-1].object == camera
+    assert bpy.context.view_layer.objects.active == camera
+    bridge.spot_represents_links.remove(len(bridge.spot_represents_links) - 1)
+
+    output_path = directory / "bridge-camera.ttl"
+    export_helper_scene(
+        output_path=output_path,
+        export_profile=EXPORT_PROFILE_SCENE_GRAPH,
+        asset_base_url="/assets",
+    )
+    text = output_path.read_text(encoding="utf8")
+    assert "a sosa:Observation, prov:Activity" in text
+    assert "nb_detail.JPG" in text
+    assert "spot:represents ex:capture_" in text
+
+    import_scene_graph_turtle(output_path)
+    reimported = helpers_by_label()["Camera_nb_detail"]
+    assert reimported[PROP_SOURCE_ASSET_PATH].endswith("nb_detail.JPG")
+    print("Set as camera test passed")
+
+
 def test_set_as_renames_helper_and_source() -> None:
     settings = bpy.context.scene.spot_tools_settings
     collection = bpy.data.collections.new("Rename Test")
@@ -241,6 +297,7 @@ def main() -> None:
         output_path = test_set_classes_and_export(directory)
         test_reimport_keeps_brot(output_path)
         test_bot_relations_need_bot_on_both_ends(directory)
+        test_set_as_camera(directory)
     test_clear_class()
     test_set_as_renames_helper_and_source()
     test_source_tags()

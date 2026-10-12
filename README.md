@@ -268,6 +268,29 @@ The importer resolves SPOT-AM relations with these rules:
 - Siblings that meet share a face. When the relations do not fix a face, the importer puts it at equal distances between the fixed faces on each side. For example, four spans chained from the front of a bridge to its rear split its length into four equal parts.
 - A space that appears more than once in the same kind of space gets only its first appearance. The importer writes a warning.
 
+#### Move spaces from SPOT-AM to SPOT-SG
+
+SPOT-AM locates a space qualitatively. Its derived region can be wrong without the data being wrong: the spans of a bridge split evenly when nothing says where the faces between them lie. You can place such spaces exactly in Blender and record that refinement as provenance.
+
+1. Import the dataset, for example into an existing AssetSpace.
+2. Move or scale the helpers that you can place exactly.
+3. Enter your name or IRI as `Agent` in the `SPOT-AM to SPOT-SG` box of the SPOT panel.
+4. Select the helpers and click `Commit Selected as SPOT-SG`. Give a label, and optionally the IRIs of the sources you used, such as a plan.
+5. Repeat for later corrections. A space committed again gets a revised matrix and box.
+6. Click `Export Transition Dataset`.
+
+The output is a snapshot in `<datasets>/exports/<project>/<timestamp>/`, like a dataset snapshot. `rdf/scene.ttl` (or the input folder's `rdf` files) holds the input unchanged. `rdf/mutations.trig` holds one entry pair per commit, in the graph gateway's `#!lbcf-entry` format, and follows the reification pattern with the current state asserted:
+
+- The retraction removes the link from the space to its SPOT-AM appearance.
+- The delta asserts the link to a new SPOT-SG appearance with its matrix, the space's bounding box, and a `prov:Activity` with agent, time, and sources.
+- RDF 1.2 reifiers name every changed triple. The old link is `prov:wasInvalidatedBy` the activity; the new link is `prov:wasGeneratedBy` it and a `prov:wasRevisionOf` the old one.
+- The SPOT-AM appearance's own statements stay in the graph, as what SPOT-AM said.
+- The first commit also states the root's bounding box, because its matrices refer to the root's frame. The root's axis directions must match the ones the input states.
+
+`Import Dataset Folder` replays the log, so it shows the current state: committed spaces at their SPOT-SG placement, and the rest resolved by SPOT-AM around them.
+
+A plain `Export TTL` writes every helper with a matrix and box. It warns when spaces are still placed by imported SPOT-AM relations, because their derived regions would then appear as exact SPOT-SG placements.
+
 ### IFC Bounding Box
 
 A Bonsai/IfcOpenShell import lands in its own `IfcProject/...` collection tree, separate from the `AssetSpace_...` collection `build_spot_scene.py` walks. Re-parenting a large IFC hierarchy into `AssetSpace_...` by hand does not scale, and the builder only looks _inside_ the AssetSpace collection for the geometry it needs.

@@ -26,6 +26,7 @@ from .spot_am_placement import (
     frame_axis_for_direction,
     resolve_directional_frame,
 )
+from .spot_transition import record_import_metadata
 from .spot_blender_common import (
     BOT_CLASS_BUILDING,
     BOT_CLASS_ELEMENT,
@@ -126,6 +127,16 @@ class ImportedSpace:
     approximate_region: bool = False
     # Stands for an AssetSpace helper already in the scene (see ImportAnchor).
     anchored: bool = False
+    # The appearance that placed the space, and its rdf:type, as written in
+    # the input. A later transition to SPOT-SG names it to retract the link.
+    chosen_appearance: str | None = None
+    chosen_appearance_type: str | None = None
+    # Whether that appearance locates the space with SPOT-AM mappings.
+    chosen_has_am: bool = False
+    # The first spot-sg:hasBoundingBox object as written, if any.
+    bbox_literal: str | None = None
+    # The directions the input states for this space's axes.
+    axis_directions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1022,6 +1033,7 @@ def parse_scene_graph_turtle(
                 spot_class=parse_prefixed_local_name(spot_type),
                 label=labels[0] if labels else local_name,
                 local_bbox=enclosing_bbox(local_bboxes) if local_bboxes else None,
+                bbox_literal=bbox_objects[0] if bbox_objects else None,
                 order=order,
                 length_unit=(
                     parse_length_unit(predicates["qudt:hasUnit"])
@@ -1108,11 +1120,25 @@ def parse_scene_graph_turtle(
 
         chosen_priorities[source_iri] = priority
         chosen_appearances[source_iri] = appearance_id
+        source_space.chosen_appearance = appearance_id
+        source_space.chosen_appearance_type = appearance_types.get(appearance_id)
+        source_space.chosen_has_am = (
+            appearance_id in am.appearance_boundary_mappings
+            or appearance_id in am.appearance_axis_mappings
+        )
         tied_appearance_counts.pop(source_iri, None)
         source_space.parent_iri = target_iri
         source_space.local_matrix = appearance_matrices.get(
             appearance_id, Matrix.Identity(4)
         )
+
+    for space_iri, axes in space_axes.items():
+        if space_iri in spaces:
+            spaces[space_iri].axis_directions = {
+                axis_name: am.axis_directions[axis_iri]
+                for axis_name, axis_iri in axes.items()
+                if axis_iri in am.axis_directions
+            }
 
     if tied_appearance_counts:
         warning_messages.append(
@@ -1472,6 +1498,14 @@ def import_scene_graph_turtle(
         root_labels.append(root_spec.label)
     apply_represents_links(spaces, helper_collection, warnings)
     bpy.context.view_layer.update()
+    record_import_metadata(
+        spaces,
+        root_ids,
+        helper_collection,
+        anchor_helper,
+        text,
+        resolved_input,
+    )
 
     helper_count = len(
         [obj for obj in helper_collection.objects if obj.get(PROP_HELPER)],

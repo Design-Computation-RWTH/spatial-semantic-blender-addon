@@ -393,18 +393,8 @@ def world_x_range(helper: bpy.types.Object) -> tuple[float, float]:
     return round(min(xs), 3), round(max(xs), 3)
 
 
-def test_spot_am_spans_inside_existing_asset_space() -> None:
-    """Spans chained by SPOT-AM, imported into an AssetSpace already in the scene.
-
-    The imported bridge has no bounding box, so the existing AssetSpace lends
-    its 90 m length. Only the outer faces of the outer spans are tied to the
-    bridge; the faces between spans are only said to meet, so the spans split
-    the length evenly. A section meets the rear of span 1 with a plain
-    boundary point and so sits on the face between spans 1 and 2. A detail
-    lies in the rear third and stays a plane.
-    """
-    bpy.ops.wm.read_factory_settings(use_empty=True)
-    spatial_semantic_addon.register()
+def bridge_fixture() -> tuple[str, str]:
+    """A 90 m model AssetSpace, and a bridge whose three spans SPOT-AM chains."""
     anchor_turtle = """\
 @prefix ex: <https://example.org/model/> .
 @prefix spot: <https://w3id.org/spot#> .
@@ -488,6 +478,22 @@ ex:Detail_BPM_Z a spot-am:BoundaryPointMapping ;
     reloc:containedInRear ex:Bridge ;
     spot-am:hasSourcePoint ex:Detail_Z_BP .
 """ + "".join(span_statements)
+    return anchor_turtle, turtle
+
+
+def test_spot_am_spans_inside_existing_asset_space() -> None:
+    """Spans chained by SPOT-AM, imported into an AssetSpace already in the scene.
+
+    The imported bridge has no bounding box, so the existing AssetSpace lends
+    its 90 m length. Only the outer faces of the outer spans are tied to the
+    bridge; the faces between spans are only said to meet, so the spans split
+    the length evenly. A section meets the rear of span 1 with a plain
+    boundary point and so sits on the face between spans 1 and 2. A detail
+    lies in the rear third and stays a plane.
+    """
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    spatial_semantic_addon.register()
+    anchor_turtle, turtle = bridge_fixture()
 
     with tempfile.TemporaryDirectory(prefix="spot-am-anchor-") as directory:
         anchor_path = Path(directory) / "model.ttl"

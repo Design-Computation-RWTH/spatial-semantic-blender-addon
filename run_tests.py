@@ -36,6 +36,7 @@ def main() -> None:
         TOOL_ROOT / "tests" / "test_import_spot_ttl_blender.py",
         TOOL_ROOT / "tests" / "test_bcf_fixture_blender.py",
         TOOL_ROOT / "tests" / "test_build_spot_scene_blender.py",
+        TOOL_ROOT / "tests" / "test_spot_transition_blender.py",
     ]
 
     for test_path in tests:

@@ -60,6 +60,13 @@ from .export_spot_ttl import (
     export_helper_scene,
 )
 from .import_spot_ttl import import_scene_graph_turtle
+from .spot_transition import (
+    PROP_SG_STATE,
+    commit_sg_placements,
+    is_placed_by_spot_am,
+    read_log,
+    write_transition_dataset,
+)
 from .dataset_snapshot import export_dataset_snapshot
 from .export_spatial_history import (
     DEFAULT_HISTORY_START,
@@ -992,6 +999,14 @@ class SPOT_PG_scene_settings(bpy.types.PropertyGroup):
         ),
         default="",
     )
+    provenance_agent: StringProperty(
+        name="Agent",
+        description=(
+            "Who commits SPOT-SG placements: an IRI, or a name that becomes an "
+            "agent IRI in the dataset's namespace"
+        ),
+        default="",
+    )
     picture_damage_candidate: PointerProperty(
         name="Damage",
         description="DOT damage to add as a feature of interest of the selected picture observation",
@@ -1175,6 +1190,27 @@ def import_anchor_from_context(
         )
         return False, None
     return True, anchor
+
+
+def report_spot_am_flattened(
+    operator: bpy.types.Operator,
+    context: bpy.types.Context,
+) -> None:
+    """Warn that an export stated imported SPOT-AM regions as SPOT-SG."""
+    count = sum(
+        1
+        for obj in context.scene.objects
+        if obj.get(PROP_HELPER) and is_placed_by_spot_am(obj)
+    )
+    if count:
+        operator.report(
+            {"WARNING"},
+            (
+                f"{count} spaces are still placed by imported SPOT-AM relations; this "
+                "export states their derived regions as SPOT-SG. Use Export "
+                "Transition Dataset to keep SPOT-AM and record what was refined"
+            ),
+        )
 
 
 def operator_error_message(error: Exception) -> str:
@@ -1502,6 +1538,107 @@ class SPOT_OT_import_dataset_folder(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SPOT_OT_commit_sg_placement(bpy.types.Operator):
+    bl_idname = "spot.commit_sg_placement"
+    bl_label = "SPOT: Commit SPOT-SG Placement"
+    bl_description = (
+        "Record the current placement of the selected imported spaces as SPOT-SG. "
+        "A space SPOT-AM placed moves to SPOT-SG; one committed before is revised. "
+        "Both are recorded as one provenance activity"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    label: StringProperty(
+        name="Label",
+        description="What was done, as the activity's label",
+        default="Placement refined with SPOT-SG",
+    )
+    agent: StringProperty(
+        name="Agent",
+        description="Who placed the spaces: an IRI, or a name",
+        default="",
+    )
+    used: StringProperty(
+        name="Used Sources",
+        description="Comma-separated IRIs of the sources the placement is based on, such as a plan",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return any(obj.get(PROP_HELPER) for obj in context.selected_objects)
+
+    def invoke(
+        self,
+        context: bpy.types.Context,
+        event: bpy.types.Event,
+    ) -> set[str]:
+        if not self.agent:
+            self.agent = context.scene.spot_tools_settings.provenance_agent
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        if not self.agent.strip():
+            self.report({"ERROR"}, "Name the agent who placed the spaces")
+            return {"CANCELLED"}
+        helpers = [obj for obj in context.selected_objects if obj.get(PROP_HELPER)]
+        try:
+            record = commit_sg_placements(
+                helpers,
+                agent=self.agent.strip(),
+                label=self.label.strip() or "Placement refined with SPOT-SG",
+                used=[value.strip() for value in self.used.split(",") if value.strip()],
+            )
+        except Exception as error:
+            self.report({"ERROR"}, operator_error_message(error))
+            return {"CANCELLED"}
+        context.scene.spot_tools_settings.provenance_agent = self.agent.strip()
+        moved = sum(1 for change in record["changes"] if change["kind"] == "am-to-sg")
+        revised = sum(1 for change in record["changes"] if change["kind"] == "sg-to-sg")
+        self.report(
+            {"INFO"},
+            f"Committed {moved} SPOT-AM to SPOT-SG transitions and {revised} revisions",
+        )
+        return {"FINISHED"}
+
+
+class SPOT_OT_export_transition_dataset(bpy.types.Operator):
+    bl_idname = "spot.export_transition_dataset"
+    bl_label = "SPOT: Export Transition Dataset"
+    bl_description = (
+        "Write the imported input as a dataset snapshot in datasets/exports/<project>/ "
+        "whose mutation log holds the committed SPOT-SG placements and their provenance"
+    )
+    bl_options = {"REGISTER"}
+
+    directory: StringProperty(
+        name="Output Folder",
+        description="Folder to write into instead of a snapshot in datasets/exports",
+        subtype="DIR_PATH",
+        default="",
+    )
+
+    def execute(self, context: bpy.types.Context) -> set[str]:
+        settings = context.scene.spot_tools_settings
+        try:
+            result = write_transition_dataset(
+                self.directory or None,
+                project_name=settings.project_name,
+                helper_collection_name=settings.helper_collection,
+            )
+        except Exception as error:
+            self.report({"ERROR"}, operator_error_message(error))
+            return {"CANCELLED"}
+        self.report(
+            {"INFO"},
+            (
+                f"Wrote {result['activity_count']} activities with "
+                f"{result['change_count']} changes to {result['output_dir']}"
+            ),
+        )
+        return {"FINISHED"}
+
+
 class SPOT_OT_export_turtle_default(bpy.types.Operator):
     bl_idname = "spot.export_turtle_default"
     bl_label = "SPOT: Export Scene Graph Turtle"
@@ -1545,6 +1682,7 @@ class SPOT_OT_export_turtle_default(bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported scene graph Turtle to {result['output_path']}")
+        report_spot_am_flattened(self, context)
         return {"FINISHED"}
 
 
@@ -1603,6 +1741,7 @@ class SPOT_OT_export_turtle_as(ExportHelper, bpy.types.Operator):
             return {"CANCELLED"}
 
         self.report({"INFO"}, f"Exported scene graph Turtle to {result['output_path']}")
+        report_spot_am_flattened(self, context)
         return {"FINISHED"}
 
 
@@ -2119,6 +2258,32 @@ class VIEW3D_PT_spot_tools(bpy.types.Panel):
             text="Import Dataset Folder",
         )
         dataset_import.helper_collection = settings.helper_collection
+
+        transition_box = layout.box()
+        transition_box.label(text="SPOT-AM to SPOT-SG")
+        am_count = sum(
+            1 for obj in context.scene.objects if obj.get(PROP_HELPER) and is_placed_by_spot_am(obj)
+        )
+        sg_count = sum(
+            1
+            for obj in context.scene.objects
+            if obj.get(PROP_HELPER) and PROP_SG_STATE in obj and obj.parent is not None
+        )
+        transition_box.label(
+            text=(
+                f"{am_count} placed by SPOT-AM, {sg_count} committed, "
+                f"{len(read_log(context.scene))} activities"
+            ),
+        )
+        transition_box.prop(settings, "provenance_agent")
+        transition_box.operator(
+            SPOT_OT_commit_sg_placement.bl_idname,
+            text="Commit Selected as SPOT-SG",
+        )
+        transition_box.operator(
+            SPOT_OT_export_transition_dataset.bl_idname,
+            text="Export Transition Dataset",
+        )
 
         bbox_box = layout.box()
         bbox_box.label(text="IFC Bounding Box")
@@ -2784,6 +2949,8 @@ CLASSES = (
     SPOT_OT_build_helper_scene,
     SPOT_OT_import_turtle_as,
     SPOT_OT_import_dataset_folder,
+    SPOT_OT_commit_sg_placement,
+    SPOT_OT_export_transition_dataset,
     SPOT_OT_export_turtle_default,
     SPOT_OT_export_turtle_as,
     SPOT_OT_export_dataset_snapshot,

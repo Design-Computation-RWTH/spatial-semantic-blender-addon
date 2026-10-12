@@ -90,6 +90,15 @@ BOT_CLASS_BUILDING = "Building"
 BOT_CLASS_STOREY = "Storey"
 BOT_CLASS_SPACE = "Space"
 BOT_CLASS_ELEMENT = "Element"
+BOT_CLASS_ZONE = "Zone"
+
+# Bridge Topology Ontology (BROT 0.21, https://w3id.org/brot#). BROT stands
+# beside BOT, not under it: a referent carries a BOT class, a BROT class,
+# both or neither, each only when it is set, never one implied by the other.
+BROT_NAMESPACE = "https://w3id.org/brot#"
+BROT_ZONE_CLASSES = ("Site", "Bridge", "SuperStructure", "SubStructure", "SpatialZone")
+BROT_COMPONENT_CLASSES = ("Component", "Joint", "Coating")
+BROT_CLASSES = (*BROT_ZONE_CLASSES, *BROT_COMPONENT_CLASSES)
 
 PROP_HELPER = "spot_helper"
 PROP_SCHEMA_VERSION = "spot_schema_version"
@@ -97,6 +106,7 @@ PROP_ROLE = "spot_role"
 PROP_SPOT_CLASS = "spot_class"
 PROP_BOT_CLASS = "spot_bot_class"
 PROP_BEO_CLASS = "spot_beo_class"
+PROP_BROT_CLASS = "spot_brot_class"
 PROP_DOT_CLASS = "spot_dot_class"
 PROP_BOT_URI_SUFFIX = "spot_bot_uri_suffix"
 PROP_URI_SUFFIX = "spot_uri_suffix"
@@ -144,6 +154,7 @@ PREFIX_IFC_TYPE_PRODUCT = "IfcTypeProduct"
 NAME_TAG_BOT = "BOT"
 NAME_TAG_SPOT = "SPOT"
 NAME_TAG_BEO = "BEO"
+NAME_TAG_BROT = "BROT"
 NAME_TAG_DOT = "DOT"
 NAME_TAG_IFC = "IFC"
 NAME_TAG_PART = "PART"
@@ -151,6 +162,7 @@ SUPPORTED_NAME_TAGS = {
     NAME_TAG_BOT,
     NAME_TAG_SPOT,
     NAME_TAG_BEO,
+    NAME_TAG_BROT,
     NAME_TAG_DOT,
     NAME_TAG_IFC,
     NAME_TAG_PART,
@@ -162,6 +174,7 @@ BOT_CLASS_BY_TOKEN = {
     BOT_CLASS_STOREY.lower(): BOT_CLASS_STOREY,
     BOT_CLASS_SPACE.lower(): BOT_CLASS_SPACE,
     BOT_CLASS_ELEMENT.lower(): BOT_CLASS_ELEMENT,
+    BOT_CLASS_ZONE.lower(): BOT_CLASS_ZONE,
 }
 
 SPOT_CLASS_BY_TOKEN = {
@@ -388,6 +401,7 @@ class SpaceNodeSpec:
     sort_key: str
     length_unit: str = LENGTH_UNIT_METER
     beo_class: str | None = None
+    brot_class: str | None = None
     local_bbox: list[float] | None = None
     source_name: str | None = None
     source_collection: str | None = None
@@ -411,6 +425,7 @@ class NameSemantics:
     bot_class: str | None = None
     spot_class: str | None = None
     beo_class: str | None = None
+    brot_class: str | None = None
     dot_class: str | None = None
     plan_kind: str | None = None
     asset_path: str | None = None
@@ -1200,6 +1215,16 @@ def normalize_beo_class(value: str | None) -> str | None:
     return normalized or None
 
 
+def normalize_brot_class(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = strip_known_prefix(value.strip(), ("brot:",)).lower()
+    return next(
+        (name for name in BROT_CLASSES if name.lower() == normalized),
+        None,
+    )
+
+
 def normalize_dot_class(value: str | None) -> str | None:
     if not value:
         return None
@@ -1306,6 +1331,7 @@ def parse_name_semantics(
         asset_base_name,
     )
     part_token = normalize_part_token(tags.get(NAME_TAG_PART))
+    brot_class = normalize_brot_class(tags.get(NAME_TAG_BROT))
     bot_class = (
         normalize_bot_class(tags.get(NAME_TAG_BOT))
         or infer_bot_class(ifc_class)
@@ -1345,6 +1371,7 @@ def parse_name_semantics(
         # damage sits is already said by its appearance: `spot:appearsIn` the
         # containing Volume Space, refined by SPOT-AM.
         bot_class = None
+        brot_class = None
 
     if proxy_role is not None:
         shared_entity_key = slugify(shared_base_name)
@@ -1361,6 +1388,7 @@ def parse_name_semantics(
         bot_class=bot_class,
         spot_class=spot_class,
         beo_class=beo_class,
+        brot_class=brot_class,
         dot_class=dot_class,
         plan_kind=plan_kind,
         asset_path=asset_path,
@@ -1385,10 +1413,13 @@ def append_name_tags(
     part_token: str | None = None,
     dot_class: str | None = None,
     ifc_class: str | None = None,
+    brot_class: str | None = None,
 ) -> str:
     tags: list[str] = []
     if bot_class:
         tags.append(f"{NAME_TAG_BOT}={bot_class}")
+    if brot_class:
+        tags.append(f"{NAME_TAG_BROT}={brot_class}")
     if spot_class:
         tags.append(f"{NAME_TAG_SPOT}={spot_class}")
     if beo_class:
@@ -1760,6 +1791,19 @@ def helper_source_collection_root(
     return bpy.data.collections.get(str(source_name))
 
 
+def helper_has_referent(helper: bpy.types.Object) -> bool:
+    """Whether a helper's space represents a classified BOT or BROT entity."""
+    return bool(helper.get(PROP_BOT_CLASS) or helper.get(PROP_BROT_CLASS))
+
+
+def helper_is_element(helper: bpy.types.Object) -> bool:
+    """Whether a helper's referent is a building or bridge element."""
+    return (
+        helper.get(PROP_BOT_CLASS) == BOT_CLASS_ELEMENT
+        or helper.get(PROP_BROT_CLASS) in BROT_COMPONENT_CLASSES
+    )
+
+
 def represents_link_owner(
     helper: bpy.types.Object,
 ) -> bpy.types.Object | bpy.types.Collection:
@@ -2036,6 +2080,8 @@ def create_helper_object(
         helper[PROP_BOT_CLASS] = spec.bot_class
     if spec.beo_class is not None:
         helper[PROP_BEO_CLASS] = spec.beo_class
+    if spec.brot_class is not None:
+        helper[PROP_BROT_CLASS] = spec.brot_class
     semantic_source_name = spec.source_name or spec.label
     dot_class = parse_name_semantics(semantic_source_name).dot_class
     if dot_class is not None:

@@ -27,7 +27,7 @@ The code came from the `tools/blender` folder of the demonstrator repository.
 
 - `export_spot_ttl.py`
   - Traverses the `SPOT Scene` helper hierarchy.
-  - Exports the SPOT scene graph together with BOT referents and optional BEO element classes.
+  - Exports the SPOT scene graph together with BOT referents and optional BEO element classes and BROT bridge classes.
   - Uses `spot:represents` to link each SPOT node to its BOT referent.
   - Declares the local CRS unit of every exported space with `qudt:hasUnit`.
 
@@ -191,7 +191,7 @@ Set `BLENDER_EXECUTABLE` if Blender is in a different location.
 
 ## Naming
 
-- Source names can append trailing semantic tags: `::BOT=<Site|Building|Storey|Space|Element>`, `::SPOT=<SpotClass>`, `::BEO=<BeoClass>`, `::DOT=Damage`, `::IFC=<IfcClass>`, and `::PART=<Id>`.
+- Source names can append trailing semantic tags: `::BOT=<Site|Building|Storey|Space|Element>`, `::SPOT=<SpotClass>`, `::BEO=<BeoClass>`, `::BROT=<BrotClass>`, `::DOT=Damage`, `::IFC=<IfcClass>`, and `::PART=<Id>`.
 - `::IFC=<IfcClass>` states the IFC class of a name that carries no `IfcWall/...` prefix. When both are present the tag wins. The value is kept as written, apart from an optional `ifc:` prefix, because this repository pins no list of IFC classes to validate against.
 - Damage geometry can be marked explicitly with `::DOT=Damage`. Existing source names beginning with `Damage`, followed by a separator or the end of the name, retain the same meaning for compatibility with the current scene. The exported SPOT space then `spot:represents` a `dot:Damage` referent, and no BOT referent: damage is not building topology, so a damage space represents the `dot:Damage` alone. A DOT class therefore clears any BOT class the defaults or an explicit `::BOT=` tag would otherwise apply. Where the damage sits is said by its appearance — `spot:appearsIn` the containing space, refined by SPOT-AM — not by a BOT referent.
 - Tags are parsed only from the trailing `::KEY=VALUE` segments, so the existing helper name prefixes remain valid.
@@ -246,7 +246,7 @@ The folder import uses the same current-state rules as the Graph Gateway. It mer
 
 The importer recreates the SPOT helper wireframes and hierarchy for checking. It uses the first `rdfs:label` when present. Otherwise, it uses the Turtle local name of the resource. When a space has multiple bounding boxes, the importer uses their enclosing axis-aligned bounding box. Multiple labels or bounding boxes produce import warnings. The importer does not recreate the original source meshes.
 If a space has no exported bounding box, the importer uses a tiny placeholder wireframe only for Blender visualization and keeps the missing bbox metadata implicit.
-The importer takes BOT and BEO classes only from the `rdf:type` of the referent that a space `spot:represents`. It does not guess a class from the position of a space in the tree. If the graph gives no class, the helper gets no class.
+The importer takes BOT, BEO, and BROT classes only from the `rdf:type` of the referent that a space `spot:represents`. It does not guess a class from the position of a space in the tree. If the graph gives no class, the helper gets no class.
 
 #### Import into an existing AssetSpace
 

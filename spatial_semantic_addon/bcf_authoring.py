@@ -9,9 +9,7 @@ import bpy
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, PointerProperty, StringProperty
 
 from .spot_blender_common import (
-    BOT_CLASS_ELEMENT,
     HELPER_COLLECTION_MARKER,
-    PROP_BOT_CLASS,
     PROP_DOT_CLASS,
     PROP_HELPER,
     PROP_SOURCE_ASSET_PATH,
@@ -19,6 +17,8 @@ from .spot_blender_common import (
     PROP_SPOT_CLASS,
     find_helper_for_source_object,
     find_source_object_for_helper,
+    helper_has_referent,
+    helper_is_element,
     parse_name_semantics,
 )
 
@@ -128,13 +128,13 @@ def is_damage_object(_owner: object, obj: bpy.types.Object) -> bool:
 
 def is_component_object(_owner: object, obj: bpy.types.Object) -> bool:
     helper = helper_for_reference(obj)
-    return helper is not None and str(helper.get(PROP_BOT_CLASS, "")) == BOT_CLASS_ELEMENT
+    return helper is not None and helper_is_element(helper)
 
 
 def is_bot_referent_object(_owner: object, obj: bpy.types.Object) -> bool:
-    """An object whose helper stands for a BOT entity a space can represent."""
+    """An object whose helper stands for a BOT or BROT entity a space can represent."""
     helper = helper_for_reference(obj)
-    return helper is not None and bool(helper.get(PROP_BOT_CLASS))
+    return helper is not None and helper_has_referent(helper)
 
 
 def resolve_picture_owner_and_helper(

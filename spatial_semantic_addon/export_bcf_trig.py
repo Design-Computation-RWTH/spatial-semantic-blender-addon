@@ -39,13 +39,12 @@ from .export_spot_ttl import (
     turtle_block,
 )
 from .spot_blender_common import (
-    BOT_CLASS_ELEMENT,
     HELPER_COLLECTION_NAME,
-    PROP_BOT_CLASS,
     PROP_SPOT_CLASS,
     SPOT_CLASS_ASSET,
     find_source_object_for_helper,
     format_number,
+    helper_is_element,
     helper_root_objects,
     quote_turtle_string,
     slugify,
@@ -111,7 +110,7 @@ def component_references(
         if (
             helper is None
             or helper.name not in registry.bot_export_suffixes
-            or str(helper.get(PROP_BOT_CLASS, "")) != BOT_CLASS_ELEMENT
+            or not helper_is_element(helper)
         ):
             raise RuntimeError(
                 f"Issue camera '{camera.name}' references non-element component '{reference.name}'"

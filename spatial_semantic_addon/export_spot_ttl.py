@@ -23,6 +23,9 @@ from .spot_blender_common import (
     BOT_CLASS_SITE,
     BOT_CLASS_SPACE,
     BOT_CLASS_STOREY,
+    BROT_COMPONENT_CLASSES,
+    BROT_NAMESPACE,
+    BROT_ZONE_CLASSES,
     BOUNDARY_POINT_SLOTS,
     LENGTH_UNIT_METER,
     LENGTH_UNIT_PIXEL,
@@ -30,6 +33,7 @@ from .spot_blender_common import (
     HELPER_COLLECTION_NAME,
     PROP_BEO_CLASS,
     PROP_BOT_CLASS,
+    PROP_BROT_CLASS,
     PROP_BOT_URI_SUFFIX,
     PROP_DOT_CLASS,
     PROP_HELPER,
@@ -77,6 +81,7 @@ from .spot_blender_common import (
     helper_am_reference_helper_name,
     helper_asset_axis_direction,
     helper_children,
+    helper_has_referent,
     helper_local_bbox,
     helper_root_objects,
     human_name,
@@ -430,10 +435,10 @@ def build_bot_export_uri_suffixes(
     shared_suffixes_by_key: dict[tuple[str, str], str] = {}
 
     for helper in ordered_helpers:
-        bot_class = helper.get(PROP_BOT_CLASS)
+        referent_class = helper.get(PROP_BOT_CLASS) or helper.get(PROP_BROT_CLASS)
         shared_entity_key = helper_shared_entity_key(helper)
-        if bot_class and shared_entity_key:
-            shared_key = (str(bot_class), shared_entity_key)
+        if referent_class and shared_entity_key:
+            shared_key = (str(referent_class), shared_entity_key)
             shared_suffix = shared_suffixes_by_key.get(shared_key)
             if shared_suffix is None:
                 base_suffix = str(
@@ -957,10 +962,10 @@ def represented_link_bot_suffixes(
                 f"'{owner.name}' represents '{reference.name}', which is not "
                 "part of the exported helper scene"
             )
-        if not target.get(PROP_BOT_CLASS):
+        if not helper_has_referent(target):
             raise RuntimeError(
                 f"'{owner.name}' represents '{reference.name}', which has no "
-                "BOT class"
+                "BOT or BROT class"
             )
         suffix = bot_export_suffixes[target.name]
         if suffix not in suffixes:
@@ -990,7 +995,7 @@ def export_space_block(
     # so this also covers a helper carrying a stale `::BOT=` tag from an older
     # scene.
     own_bot_suffix = None
-    if helper.get(PROP_BOT_CLASS) and not helper_dot_class(helper):
+    if helper_has_referent(helper) and not helper_dot_class(helper):
         own_bot_suffix = bot_export_suffixes[helper.name]
         predicates.append(f"spot:represents {LOCAL_TERM_MARKER}{own_bot_suffix}")
     for link_suffix in represented_link_bot_suffixes(helper, bot_export_suffixes):
@@ -1411,15 +1416,22 @@ def export_bot_block(
     helper: bpy.types.Object,
     bot_export_suffixes: dict[str, str],
 ) -> str:
+    """The referent a space represents, typed only with the classes it has."""
     bot_class = helper.get(PROP_BOT_CLASS)
-    if not bot_class:
-        raise RuntimeError(f"Helper '{helper.name}' is missing {PROP_BOT_CLASS}")
+    brot_class = helper.get(PROP_BROT_CLASS)
+    if not bot_class and not brot_class:
+        raise RuntimeError(f"Helper '{helper.name}' has neither a BOT nor a BROT class")
 
-    label_literal = quote_turtle_string(helper_display_label(helper))
-    predicates = [f"a bot:{bot_class}", f"rdfs:label {label_literal}"]
+    predicates: list[str] = []
+    if bot_class:
+        predicates.append(f"a bot:{bot_class}")
     beo_class = helper.get(PROP_BEO_CLASS)
     if beo_class:
-        predicates.insert(1, f"a beo:{beo_class}")
+        predicates.append(f"a beo:{beo_class}")
+    if brot_class:
+        predicates.append(f"a brot:{brot_class}")
+    label_literal = quote_turtle_string(helper_display_label(helper))
+    predicates.append(f"rdfs:label {label_literal}")
 
     return turtle_block(
         f"{LOCAL_TERM_MARKER}{bot_export_suffixes[helper.name]}", predicates
@@ -1579,13 +1591,21 @@ def require_bot_suffix(
     return suffix
 
 
-def bot_relation_for_child(helper: bpy.types.Object) -> str:
-    bot_class = str(helper.get(PROP_BOT_CLASS, ""))
+def bot_relation_for_child(helper: bpy.types.Object) -> str | None:
+    """
+    The BOT relation from the parent's referent to this helper's, or None.
+
+    Both referents must carry a BOT class: a space without one is no BOT
+    entity, whatever it contains.
+    """
     parent = helper.parent
     if parent is None:
         raise RuntimeError(f"Helper '{helper.name}' is missing a helper parent")
 
+    bot_class = str(helper.get(PROP_BOT_CLASS, ""))
     parent_bot_class = str(parent.get(PROP_BOT_CLASS, ""))
+    if not bot_class or not parent_bot_class:
+        return None
     if bot_class == BOT_CLASS_BUILDING and parent_bot_class == BOT_CLASS_SITE:
         return "bot:hasBuilding"
     if bot_class == BOT_CLASS_STOREY and parent_bot_class == BOT_CLASS_BUILDING:
@@ -1597,20 +1617,31 @@ def bot_relation_for_child(helper: bpy.types.Object) -> str:
     return "bot:containsZone"
 
 
-def export_bot_hierarchy_block(
-    helper: bpy.types.Object,
-    bot_export_suffixes: dict[str, str],
-) -> str:
-    if helper.parent is None or not helper.parent.get(PROP_HELPER):
-        raise RuntimeError(f"Helper '{helper.name}' is missing a helper parent")
+def brot_relation_for_child(helper: bpy.types.Object) -> str | None:
+    """
+    The BROT relation from the parent's referent to this helper's, or None.
 
+    Both referents must carry a BROT class, and only pairs that BROT's
+    domains and ranges admit get one: Joint and Coating are no
+    `brot:Component`, so a zone holds them through no BROT relation.
+    """
     parent = helper.parent
-    predicate = bot_relation_for_child(helper)
-    return (
-        f"{LOCAL_TERM_MARKER}{require_bot_suffix(parent, bot_export_suffixes)} "
-        f"{predicate} "
-        f"{LOCAL_TERM_MARKER}{require_bot_suffix(helper, bot_export_suffixes)} ."
-    )
+    if parent is None:
+        return None
+    brot_class = str(helper.get(PROP_BROT_CLASS, ""))
+    parent_brot_class = str(parent.get(PROP_BROT_CLASS, ""))
+    if parent_brot_class in BROT_ZONE_CLASSES:
+        if brot_class in BROT_ZONE_CLASSES:
+            return "brot:containsZone"
+        if brot_class == "Component":
+            return "brot:containsComponent"
+    if parent_brot_class == "Component":
+        return {
+            "Component": "brot:aggregates",
+            "Joint": "brot:hasJoint",
+            "Coating": "brot:hasCoating",
+        }.get(brot_class)
+    return None
 
 
 def build_export_resource_registry(
@@ -1666,6 +1697,7 @@ def write_turtle(
     include_bbox = is_scene_graph_profile(export_profile)
     include_transform = is_scene_graph_profile(export_profile)
     include_beo = any(helper.get(PROP_BEO_CLASS) for helper in exported_helpers)
+    include_brot = any(helper.get(PROP_BROT_CLASS) for helper in exported_helpers)
     include_am = any(helper_am_enabled(helper) for helper in exported_helpers)
     include_dot = any(helper_dot_class(helper) for helper in exported_helpers)
     include_picture_observations = any(
@@ -1713,6 +1745,8 @@ def write_turtle(
         ]
     if include_dot:
         lines[-2:-2] = ["@prefix dot: <https://w3id.org/dot#> ."]
+    if include_brot:
+        lines[-2:-2] = [f"@prefix brot: <{BROT_NAMESPACE}> ."]
 
     emitted_bot_suffixes: set[str] = set()
     emitted_dot_suffixes: set[str] = set()
@@ -1774,7 +1808,7 @@ def write_turtle(
             lines.append("")
 
     for helper in exported_helpers:
-        if not helper.get(PROP_BOT_CLASS):
+        if not helper_has_referent(helper):
             continue
         bot_suffix = require_bot_suffix(helper, bot_export_suffixes)
         if bot_suffix in emitted_bot_suffixes:
@@ -1841,24 +1875,26 @@ def write_turtle(
         lines.append("")
 
     for helper in exported_helpers:
-        if helper.parent is None:
-            continue
-        if not helper.get(PROP_BOT_CLASS):
-            continue
         parent = helper.parent
-        if not parent.get(PROP_HELPER) or not parent.get(PROP_BOT_CLASS):
+        if parent is None or not parent.get(PROP_HELPER):
             continue
-        predicate = bot_relation_for_child(helper)
-        hierarchy_key = (
-            require_bot_suffix(parent, bot_export_suffixes),
-            predicate,
-            require_bot_suffix(helper, bot_export_suffixes),
-        )
-        if hierarchy_key in emitted_bot_hierarchy:
-            continue
-        emitted_bot_hierarchy.add(hierarchy_key)
-        lines.append(export_bot_hierarchy_block(helper, bot_export_suffixes))
-        lines.append("")
+        for predicate in (
+            bot_relation_for_child(helper),
+            brot_relation_for_child(helper),
+        ):
+            if predicate is None:
+                continue
+            parent_suffix = require_bot_suffix(parent, bot_export_suffixes)
+            child_suffix = require_bot_suffix(helper, bot_export_suffixes)
+            hierarchy_key = (parent_suffix, predicate, child_suffix)
+            if hierarchy_key in emitted_bot_hierarchy:
+                continue
+            emitted_bot_hierarchy.add(hierarchy_key)
+            lines.append(
+                f"{LOCAL_TERM_MARKER}{parent_suffix} {predicate} "
+                f"{LOCAL_TERM_MARKER}{child_suffix} ."
+            )
+            lines.append("")
 
     if export_profile == EXPORT_PROFILE_SPOT_ONLY:
         for helper in exported_helpers:

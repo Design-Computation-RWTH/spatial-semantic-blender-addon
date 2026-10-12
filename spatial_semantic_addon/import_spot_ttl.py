@@ -33,6 +33,7 @@ from .spot_blender_common import (
     BOT_CLASS_SITE,
     BOT_CLASS_SPACE,
     BOT_CLASS_STOREY,
+    BROT_NAMESPACE,
     HELPER_COLLECTION_NAME,
     LENGTH_UNIT_METER,
     LENGTH_UNIT_PIXEL,
@@ -73,6 +74,7 @@ LINKING_SPOT_CLASSES = {"HorizontalAreaSpace", "VerticalAreaSpace"}
 KNOWN_PREFIXES = {
     "beo": "https://pi.pauwel.be/voc/buildingelement#",
     "bot": "https://w3id.org/bot#",
+    "brot": BROT_NAMESPACE,
     "gom": "https://w3id.org/gom#",
     "qudt": "http://qudt.org/schema/qudt/",
     "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
@@ -121,6 +123,7 @@ class ImportedSpace:
     link_target_names: list[str] = field(default_factory=list)
     bot_class: str | None = None
     beo_class: str | None = None
+    brot_class: str | None = None
     local_matrix: Matrix = field(default_factory=lambda: Matrix.Identity(4))
     parent_iri: str | None = None
     children: list[str] = field(default_factory=list)
@@ -574,6 +577,7 @@ def helper_name_for_import(
     bot_class: str | None,
     spot_class: str,
     beo_class: str | None,
+    brot_class: str | None = None,
 ) -> str:
     if role == ROLE_SITE:
         base_name = f"SPOT::Imported::Site::{local_name}"
@@ -593,6 +597,7 @@ def helper_name_for_import(
         bot_class=bot_class,
         spot_class=spot_class,
         beo_class=beo_class,
+        brot_class=brot_class,
     )
 
 
@@ -831,6 +836,7 @@ def parse_scene_graph_turtle(
     space_axes: dict[str, dict[str, str]] = {}
     bot_types: dict[str, str] = {}
     beo_types: dict[str, str] = {}
+    brot_types: dict[str, str] = {}
     order = 0
     skipped_statements = 0
 
@@ -1065,14 +1071,22 @@ def parse_scene_graph_turtle(
             (rdf_type for rdf_type in rdf_types if rdf_type.startswith("beo:")),
             None,
         )
-        if bot_type is not None or beo_type is not None:
+        brot_type = next(
+            (rdf_type for rdf_type in rdf_types if rdf_type.startswith("brot:")),
+            None,
+        )
+        if bot_type is not None or beo_type is not None or brot_type is not None:
             if bot_type is not None:
                 bot_types[subject] = parse_prefixed_local_name(bot_type)
             if beo_type is not None:
                 beo_types[subject] = parse_prefixed_local_name(beo_type)
+            if brot_type is not None:
+                brot_types[subject] = parse_prefixed_local_name(brot_type)
             continue
 
-        if any(predicate.startswith("bot:") for predicate in predicates):
+        if any(
+            predicate.startswith(("bot:", "brot:")) for predicate in predicates
+        ):
             continue
 
         if linked_appearances:
@@ -1230,7 +1244,7 @@ def parse_scene_graph_turtle(
 
     for space in spaces.values():
         space.children.sort(key=lambda child_id: spaces[child_id].order)
-    assign_represented_referents(spaces, bot_types, beo_types)
+    assign_represented_referents(spaces, bot_types, beo_types, brot_types)
 
     return spaces, sorted(root_ids, key=lambda space_id: spaces[space_id].order)
 
@@ -1239,6 +1253,7 @@ def assign_represented_referents(
     spaces: dict[str, ImportedSpace],
     bot_types: dict[str, str],
     beo_types: dict[str, str],
+    brot_types: dict[str, str],
 ) -> None:
     """
     Split each space's `spot:represents` values into the one BOT referent it
@@ -1251,7 +1266,7 @@ def assign_represented_referents(
     representers: dict[str, list[ImportedSpace]] = {}
     for space in ordered:
         for iri in space.represented_iris:
-            if iri in bot_types or iri in beo_types:
+            if iri in bot_types or iri in beo_types or iri in brot_types:
                 representers.setdefault(iri, []).append(space)
 
     owners_by_iri: dict[str, list[ImportedSpace]] = {}
@@ -1272,6 +1287,7 @@ def assign_represented_referents(
                 space.bot_iri = iri
                 space.bot_class = bot_types.get(iri)
                 space.beo_class = beo_types.get(iri)
+                space.brot_class = brot_types.get(iri)
             elif space.bot_iri != iri:
                 target = next((owner for owner in owners if owner is not space), None)
                 if target is not None:
@@ -1360,12 +1376,14 @@ def build_imported_scene_spec(
             role=role,
             spot_class=space.spot_class,
             bot_class=bot_class,
+            brot_class=space.brot_class,
             helper_name=helper_name_for_import(
                 role,
                 space.local_name,
                 bot_class,
                 space.spot_class,
                 space.beo_class,
+                space.brot_class,
             ),
             uri_suffix=space.local_name,
             bot_uri_suffix=space.bot_local_name or f"ref_{space.local_name}",

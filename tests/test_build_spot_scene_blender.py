@@ -1101,8 +1101,8 @@ def test_asset_space_without_storeys_builds() -> None:
     # A default cube stretched to the asset's size, as one is drawn by hand.
     root = box_object("AssetSpace_NBW", asset, (5.0, 2.0, 1.5), size=2.0)
     root.scale = (5.0, 2.0, 1.5)
-    bpy.context.view_layer.update()
     cube = box_object("Cube", asset, (1.5, 1.5, 1.5))
+    bpy.context.view_layer.update()
 
     result = build_helper_scene(visible_only=False)
 
@@ -1129,6 +1129,18 @@ def test_asset_space_without_storeys_builds() -> None:
         2.0,
         1.5,
     ]
+
+    # A helper scaled by hand to fit is exported in metres: the scale goes
+    # into its box, and its matrix stays a translation.
+    cube_helper.scale = (4.0, 1.0, 1.0)
+    bpy.context.view_layer.update()
+    with tempfile.TemporaryDirectory(prefix="spot-scaled-export-") as directory:
+        output = Path(directory) / "scene.ttl"
+        export_helper_scene(output_path=output, precision=3)
+        text = output.read_text(encoding="utf8")
+    assert '"[-5,-2,-1.5,5,2,1.5]"^^spot-sg:boundingBoxArray' in text, text
+    assert '"[-2,-0.5,-0.5,2,0.5,0.5]"^^spot-sg:boundingBoxArray' in text, text
+    assert '"[1,0,0,0,0,1,0,0,0,0,1,0,-3.5,-0.5,0,1]"^^gom:columnMajorArray' in text, text
     print("AssetSpace without storeys test passed")
 
 

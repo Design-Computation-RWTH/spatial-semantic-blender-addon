@@ -9,6 +9,8 @@ import bpy
 from mathutils import Matrix, Vector
 
 from .spot_blender_common import (
+    frame_without_scale,
+    scaled_local_bbox,
     APPEARANCE_TARGET_ASSET,
     AmDerivedRegion,
     BOT_CLASS_BUILDING,
@@ -295,28 +297,6 @@ def root_world_bbox(root: bpy.types.Collection | bpy.types.Object) -> Aabb | Non
     if isinstance(root, bpy.types.Object):
         return semantic_object_bbox(root)
     return collection_geometry_bbox(root)
-
-
-def frame_without_scale(matrix: Matrix) -> Matrix:
-    """A source object's location and rotation, without its scale.
-
-    A helper's box is written out in metres as it stands. A scaled source, say
-    a default cube stretched to a bridge's length, would otherwise hand its
-    scale to the helper, which keeps a 2 m box inside a stretched frame: the
-    export then states a 2 m bridge, and every child inherits the stretch.
-    """
-    location, rotation, _scale = matrix.decompose()
-    return make_world_matrix(location, rotation)
-
-
-def scaled_local_bbox(local_bbox: list[float], matrix: Matrix) -> list[float]:
-    """Carry a source object's scale from its frame into its local box."""
-    scale = matrix.to_scale()
-    corners = [
-        [local_bbox[index] * scale[index], local_bbox[index + 3] * scale[index]]
-        for index in range(3)
-    ]
-    return [min(pair) for pair in corners] + [max(pair) for pair in corners]
 
 
 def unscaled_source_frame(

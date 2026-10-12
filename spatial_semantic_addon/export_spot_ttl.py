@@ -97,6 +97,7 @@ from .spot_blender_common import (
 
 EXPORT_PROFILE_SCENE_GRAPH = "scene-graph"
 EXPORT_PROFILE_SPOT_ONLY = "spot-only"
+BOT_PREFIX_LINE = "@prefix bot: <https://w3id.org/bot#> ."
 DEFAULT_BASE_IRI = "http://localhost:4000/scene/"
 LEGACY_DEFAULT_BASE_IRI = "https://example.org/scene#"
 LEGACY_HASH_BASE_IRI = "http://localhost:4000/scene#"
@@ -1596,7 +1597,8 @@ def bot_relation_for_child(helper: bpy.types.Object) -> str | None:
     The BOT relation from the parent's referent to this helper's, or None.
 
     Both referents must carry a BOT class: a space without one is no BOT
-    entity, whatever it contains.
+    entity, whatever it contains. An element holds sub-elements only; a zone
+    holds zones, spaces and elements.
     """
     parent = helper.parent
     if parent is None:
@@ -1606,6 +1608,8 @@ def bot_relation_for_child(helper: bpy.types.Object) -> str | None:
     parent_bot_class = str(parent.get(PROP_BOT_CLASS, ""))
     if not bot_class or not parent_bot_class:
         return None
+    if parent_bot_class == BOT_CLASS_ELEMENT:
+        return "bot:hasSubElement" if bot_class == BOT_CLASS_ELEMENT else None
     if bot_class == BOT_CLASS_BUILDING and parent_bot_class == BOT_CLASS_SITE:
         return "bot:hasBuilding"
     if bot_class == BOT_CLASS_STOREY and parent_bot_class == BOT_CLASS_BUILDING:
@@ -1698,6 +1702,7 @@ def write_turtle(
     include_transform = is_scene_graph_profile(export_profile)
     include_beo = any(helper.get(PROP_BEO_CLASS) for helper in exported_helpers)
     include_brot = any(helper.get(PROP_BROT_CLASS) for helper in exported_helpers)
+    include_bot = any(helper.get(PROP_BOT_CLASS) for helper in exported_helpers)
     include_am = any(helper_am_enabled(helper) for helper in exported_helpers)
     include_dot = any(helper_dot_class(helper) for helper in exported_helpers)
     include_picture_observations = any(
@@ -1708,7 +1713,7 @@ def write_turtle(
     lines: list[str] = [
         f"@prefix {local_prefix}: <{base_iri}> .",
         "@prefix spot: <https://w3id.org/spot#> .",
-        "@prefix bot: <https://w3id.org/bot#> .",
+        BOT_PREFIX_LINE,
         f"@prefix qudt: <{QUDT_SCHEMA_IRI}> .",
         f"@prefix unit: <{QUDT_UNIT_IRI}> .",
         "@prefix dcat: <http://www.w3.org/ns/dcat#> .",
@@ -1747,6 +1752,8 @@ def write_turtle(
         lines[-2:-2] = ["@prefix dot: <https://w3id.org/dot#> ."]
     if include_brot:
         lines[-2:-2] = [f"@prefix brot: <{BROT_NAMESPACE}> ."]
+    if not include_bot:
+        lines.remove(BOT_PREFIX_LINE)
 
     emitted_bot_suffixes: set[str] = set()
     emitted_dot_suffixes: set[str] = set()
